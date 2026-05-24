@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# SQLite database
+/db/tmt_alpha.db
+
+# Runtime output and logs
+/output/
+*.log
+
+# Local configs and secrets
+config.yaml
+config.local.yaml
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local history
+.history/
+.claude/
