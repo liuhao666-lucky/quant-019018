@@ -21,7 +21,6 @@ from pathlib import Path
 from core.config_loader import load_config
 from db.data_pipeline import load_merged_data, load_snapshot_1445
 from core.strategy import TMTAlphaStrategy
-from model.model7_exit_logic import PositionState, check_exit
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +162,7 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> d
     bt = cfg.get("backtest", {})
     initial_capital = bt.get("initial_capital", 1000)
     max_pos_ratio = bt.get("max_position_ratio", 1.0)
+    warmup_max_ratio = cfg.get("system", {}).get("warmup_max_position_ratio", 0.0)
 
     ex = cfg.get("execution", {})
     m_max = ex.get("m_max_normal", 500)
@@ -208,6 +208,9 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> d
     strategy = TMTAlphaStrategy(cfg, snapshot_map=snapshot_map)
     df = strategy.prepare_data(raw_df)
 
+    # 动态仓位乘数所需：TMT指数前一日20日均线（shift(1) 消除未来函数）
+    df["tmt_ma20_yesterday"] = df["tmt_close"].rolling(20, min_periods=5).mean().shift(1)
+
     warmup = strategy.warmup_days
     if len(df) < warmup:
         print(f"[警告] 数据不足 {warmup} 条，无法完成预热期。")
@@ -225,10 +228,10 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> d
     nav_list = []
     date_list = []
     total_cost = 0.0
-    pos_state = PositionState()
 
     holding_shares = 0.0
     avg_cost_per_share = 0.0
+    holding_days = 0          # 持仓交易天数计数（用于时间止损）
 
     print(f"开始回测，预热期 {warmup} 天，数据总量 {len(df)} 天…")
 
@@ -242,10 +245,16 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> d
                 position_value *= (1 + fund_return / 100)
 
         if t >= warmup:
+            # 持仓天数计数：有持仓时每日+1，无持仓时归零
+            if position_value > 0.01:
+                holding_days += 1
+            else:
+                holding_days = 0
+
             # 计算真实持仓收益率，传入策略供止盈逻辑使用
             invested_capital = holding_shares * avg_cost_per_share
             current_gain = (position_value / invested_capital - 1) if invested_capital > 0 else 0.0
-            signal = strategy.process_day(t, df, current_gain)
+            signal = strategy.process_day(t, df, current_gain, holding_days)
             signals.append(signal)
 
             amount = signal["amount"]
@@ -267,6 +276,19 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> d
                 "position": round(position_value, 2),
             })
 
+            # 动态仓位乘数（无未来函数）：用前一日 MA20 与当日收盘价比较
+            # 预热期内使用 warmup_max_position_ratio，正常期使用 max_position_ratio
+            if signal.get("warmup_active") and warmup_max_ratio > 0:
+                current_max_position = warmup_max_ratio
+            else:
+                base_max_pos = max_pos_ratio
+                tmt_close_val = row.get("tmt_close", 0)
+                tmt_ma20_yesterday = row.get("tmt_ma20_yesterday", 0)
+                if pd.notna(tmt_ma20_yesterday) and tmt_ma20_yesterday > 0 and tmt_close_val > tmt_ma20_yesterday:
+                    current_max_position = min(0.95, base_max_pos * 1.08)
+                else:
+                    current_max_position = base_max_pos
+
             # 所有买卖决策由 strategy 统一产出，backtest 仅负责执行
             if action == "buy" and amount > 0:
                 amount = min(amount, m_max)
@@ -274,7 +296,7 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> d
                     pass
                 else:
                     current_total = cash + position_value
-                    pos_limit = max_pos_ratio * current_total - position_value
+                    pos_limit = current_max_position * current_total - position_value
                     buy_amount = min(amount, cash, pos_limit)
                     if buy_amount >= 1.0:
                         cost = buy_amount * TRANSACTION_COST
@@ -304,12 +326,26 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> d
                     position_value -= sell_amount
                     cash += sell_amount - cost
                     total_cost += cost
-                    reason = "移动止盈清仓" if signal.get("trailing_stop") else signal.get("channel", "")
+                    # 确定卖出原因
+                    if signal.get("trailing_stop"):
+                        reason = "移动止盈清仓"
+                    elif signal.get("time_stop"):
+                        reason = f"时间止损(持仓{holding_days}天)"
+                    elif signal.get("signal_decay"):
+                        reason = f"信号衰减(Score={signal['score_eff']:.1f})"
+                    elif signal.get("force_reduce"):
+                        reason = "强平"
+                    else:
+                        reason = f"止盈({signal.get('channel', '')})"
                     trade_log.append({
                         "date": row["trade_date"], "action": "sell",
                         "amount": sell_amount, "cost": cost,
                         "reason": reason
                     })
+                    # 全部清仓后重置持仓天数和时间止损状态
+                    if position_value < 0.01:
+                        holding_days = 0
+                        strategy.pos_state.time_stop_triggered = False
 
         total_value = cash + position_value
         nav_list.append(total_value / initial_capital)

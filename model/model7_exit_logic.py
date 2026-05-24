@@ -18,6 +18,11 @@ class PositionState:
         # 移动止盈
         self.trailing_active = False     # 是否已激活移动止盈
         self.trailing_peak = 0.0        # 激活后的历史最高净值
+        # 信号衰减减仓冷却
+        self.signal_decay_cooldown_end = -999
+        # 时间止损：首次买入日期（用于计算持仓天数）
+        self.first_buy_date = None       # 首次建仓日期 str
+        self.time_stop_triggered = False # 是否已触发时间止损（防止重复触发）
 
 
 def get_view_attitude(cfg: dict) -> int:
@@ -126,10 +131,81 @@ def check_trailing_stop(fund_nav: float, current_gain: float, cfg: dict,
     return 0.0, state
 
 
+def check_signal_decay_sell(score_eff: float, t: int, cfg: dict,
+                            pos_state: PositionState) -> tuple:
+    """
+    信号衰减减仓：当 Score_eff 跌破阈值时，主动卖出部分持仓。
+
+    触发条件：
+    - signal_decay_enabled = true
+    - score_eff < signal_decay_sell_threshold（默认 20）
+    - 不在冷却期内
+
+    返回: (sell_ratio, pos_state)
+    """
+    el = cfg.get("exit_logic", {})
+    if not el.get("signal_decay_enabled", True):
+        return 0.0, pos_state
+
+    if t <= pos_state.signal_decay_cooldown_end:
+        return 0.0, pos_state
+
+    threshold = el.get("signal_decay_sell_threshold", 20)
+    if score_eff < threshold:
+        ratio = el.get("signal_decay_sell_ratio", 0.50)
+        cooldown = el.get("signal_decay_cooldown_days", 5)
+        pos_state.signal_decay_cooldown_end = t + cooldown
+        return ratio, pos_state
+
+    return 0.0, pos_state
+
+
+def check_time_stop(holding_days: int, current_gain: float, cfg: dict,
+                    pos_state: PositionState) -> tuple:
+    """
+    时间止损：持仓超过 N 个交易日后，若亏损超过阈值，强制全部卖出。
+
+    触发条件：
+    - time_stop_enabled = true
+    - holding_days > time_stop_days（默认 60）
+    - time_stop_loss_only = false 时无条件触发
+    - time_stop_loss_only = true 时，要求 current_gain <= time_stop_loss_threshold
+    - 未触发过（防止同一段持仓重复触发）
+
+    返回: (sell_ratio, pos_state)
+    """
+    el = cfg.get("exit_logic", {})
+    if not el.get("time_stop_enabled", True):
+        return 0.0, pos_state
+
+    if pos_state.time_stop_triggered:
+        return 0.0, pos_state
+
+    max_days = el.get("time_stop_days", 60)
+    loss_only = el.get("time_stop_loss_only", True)
+    loss_threshold = el.get("time_stop_loss_threshold", -0.065)
+
+    if holding_days > max_days:
+        if not loss_only:
+            pos_state.time_stop_triggered = True
+            return el.get("time_stop_sell_ratio", 1.0), pos_state
+        elif current_gain <= loss_threshold:
+            # 仅在亏损超过阈值时才触发，避免微亏被洗出
+            pos_state.time_stop_triggered = True
+            return el.get("time_stop_sell_ratio", 1.0), pos_state
+
+    return 0.0, pos_state
+
+
 def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
-               exec_state=None, current_gain: float = 0.0) -> tuple:
+               exec_state=None, current_gain: float = 0.0,
+               score_eff: float = 50.0, holding_days: int = 0) -> tuple:
     """
     综合退出逻辑检查。
+
+    参数:
+      - score_eff: 当前信号压缩得分（用于信号衰减减仓判断）
+      - holding_days: 持仓交易天数（用于时间止损判断）
 
     返回: (action_dict, pos_state)
     action_dict 包含:
@@ -138,10 +214,11 @@ def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
       - sell_ratio: float (止盈卖出比例)
       - action: str ("sell" / "hold")
       - trailing_stop: bool
+      - signal_decay: bool      # 是否由信号衰减触发
+      - time_stop: bool         # 是否由时间止损触发
       - excess_dd: float
       - threshold_adjust: float
     """
-    el = cfg.get("exit_logic", {})
     force_days = 5
 
     excess_dd = df["Excess_DD"].iloc[t]
@@ -156,6 +233,8 @@ def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
     action = "hold"
     sell_ratio = 0.0
     trailing_stop = False
+    signal_decay = False
+    time_stop = False
 
     # 强制平仓（优先级最高）
     if force_reduce and t >= pos_state.forced_reduce_end:
@@ -165,8 +244,16 @@ def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
         if exec_state:
             exec_state.forced_reduce_end = t + force_days
 
-    # 止盈检查（仅在未触发强平时）
-    if not force_reduce and current_gain > 0:
+    # === 时间止损（优先级高于止盈，低于强平） ===
+    if not force_reduce and holding_days > 0:
+        ts_ratio, pos_state = check_time_stop(holding_days, current_gain, cfg, pos_state)
+        if ts_ratio > 0:
+            action = "sell"
+            sell_ratio = ts_ratio
+            time_stop = True
+
+    # 止盈检查（仅在未触发强平且未触发时间止损时）
+    if not force_reduce and not time_stop and current_gain > 0:
         tp_ratio, pos_state = check_take_profit(current_gain, t, cfg, pos_state)
         if tp_ratio > 0:
             action = "sell"
@@ -179,6 +266,14 @@ def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
             sell_ratio = ts_ratio
             trailing_stop = True
 
+    # === 信号衰减减仓（最低优先级，不覆盖已触发的卖出） ===
+    if not force_reduce and not time_stop and sell_ratio == 0:
+        sd_ratio, pos_state = check_signal_decay_sell(score_eff, t, cfg, pos_state)
+        if sd_ratio > 0:
+            action = "sell"
+            sell_ratio = sd_ratio
+            signal_decay = True
+
     return {
         "warning": warning,
         "force_reduce": force_reduce,
@@ -187,4 +282,6 @@ def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
         "excess_dd": excess_dd,
         "threshold_adjust": thresh_adj,
         "trailing_stop": trailing_stop,
+        "signal_decay": signal_decay,
+        "time_stop": time_stop,
     }, pos_state

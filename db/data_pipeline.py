@@ -68,7 +68,6 @@ def _create_tables(conn: sqlite3.Connection):
             volume      REAL,
             amount      REAL,
             created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at  TEXT,
             PRIMARY KEY (trade_date, index_code)
         );
 
@@ -77,8 +76,7 @@ def _create_tables(conn: sqlite3.Connection):
             net_value     REAL,
             acc_value     REAL,
             daily_return  REAL,
-            created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at    TEXT
+            created_at    TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS guidance (
@@ -104,20 +102,21 @@ def _create_tables(conn: sqlite3.Connection):
 
 
 def add_timestamps_if_missing(conn: sqlite3.Connection):
-    """检测 market_daily 和 fund_nav 表是否缺少时间戳字段，若缺失则 ALTER TABLE 添加"""
+    """检测表是否缺少时间戳字段，若缺失则 ALTER TABLE 添加。
+    SQLite 的 ALTER TABLE ADD COLUMN 不支持 DEFAULT 子句，
+    因此仅添加 NULLABLE TEXT 列，created_at 值由 INSERT 语句写入。"""
     cursor = conn.cursor()
 
     for table, columns in [
-        ("market_daily", ["created_at", "updated_at"]),
-        ("fund_nav", ["created_at", "updated_at"]),
+        ("market_daily", ["created_at"]),
+        ("fund_nav", ["created_at"]),
         ("guidance", ["created_at"]),
     ]:
         cursor.execute(f"PRAGMA table_info({table})")
         existing = {row[1] for row in cursor.fetchall()}
         for col in columns:
             if col not in existing:
-                default = " DEFAULT CURRENT_TIMESTAMP" if col == "created_at" else ""
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT{default}")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
                 print(f"  [迁移] {table} 添加字段 {col}")
 
     conn.commit()
@@ -294,11 +293,10 @@ def save_market_daily(rows: list, index_code: str):
         sql = """
             INSERT OR REPLACE INTO market_daily
             (trade_date, index_code, open, high, low, close,
-             change, change_pct, volume, amount, created_at, updated_at)
+             change, change_pct, volume, amount, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     COALESCE((SELECT created_at FROM market_daily
-                              WHERE trade_date = ? AND index_code = ?), ?),
-                    ?)
+                              WHERE trade_date = ? AND index_code = ?), ?))
         """
         records = []
         for r in rows:
@@ -315,7 +313,6 @@ def save_market_daily(rows: list, index_code: str):
                 r.get("volume"),
                 r.get("amount"),
                 td, index_code, now_str,  # COALESCE 参数
-                now_str,                   # updated_at
             ))
         conn.executemany(sql, records)
         conn.commit()
@@ -335,10 +332,9 @@ def save_fund_nav(rows: list):
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         sql = """
             INSERT OR REPLACE INTO fund_nav
-            (trade_date, net_value, acc_value, daily_return, created_at, updated_at)
+            (trade_date, net_value, acc_value, daily_return, created_at)
             VALUES (?, ?, ?, ?,
-                    COALESCE((SELECT created_at FROM fund_nav WHERE trade_date = ?), ?),
-                    ?)
+                    COALESCE((SELECT created_at FROM fund_nav WHERE trade_date = ?), ?))
         """
         records = []
         for r in rows:
@@ -349,7 +345,6 @@ def save_fund_nav(rows: list):
                 r.get("acc_value"),
                 r.get("daily_return"),
                 td, now_str,  # COALESCE 参数
-                now_str,      # updated_at
             ))
         conn.executemany(sql, records)
         conn.commit()

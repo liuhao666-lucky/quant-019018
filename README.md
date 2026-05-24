@@ -168,11 +168,11 @@ erDiagram
         REAL high  "最高价"
         REAL low   "最低价"
         REAL close "收盘价"
+        REAL change "涨跌额"
         REAL change_pct "涨跌幅 %"
         REAL volume "成交量"
         REAL amount "成交额 元"
         TEXT created_at "创建时间"
-        TEXT updated_at "更新时间"
     }
 
     fund_nav {
@@ -181,7 +181,6 @@ erDiagram
         REAL acc_value "累计净值"
         REAL daily_return "日收益率 %"
         TEXT created_at
-        TEXT updated_at
     }
 
     snapshot_1445 {
@@ -314,23 +313,23 @@ gantt
     dateFormat HH:mm
     axisFormat %H:%M
 
-    section 14:45 日间
-    拉取实时指数      :active, t1, 14:45, 10min
-    写入 snapshot_1445 :t2, after t1, 1min
-    计算策略信号      :t3, after t2, 1min
-    企业微信推送      :t4, after t3, 1min
+    section 14:45日间
+    拉取实时指数      :t1, 14:45, 10m
+    写入snapshot_1445 :t2, after t1, 1m
+    计算策略信号      :t3, after t2, 1m
+    企业微信推送      :t4, after t3, 1m
 
     section 市场时间
-    A股收盘 15:00     :milestone, m1, 15:00, 0min
-    基金净值公布 ~20:00 :milestone, m2, 20:00, 0min
+    A股收盘15:00      :milestone, 15:00, 0m
+    基金净值公布~20:00 :milestone, 20:00, 0m
 
-    section 23:30 收盘
-    拉取收盘数据      :t5, 23:30, 10min
-    写入 market_daily :t6, after t5, 2min
-    拉取基金净值      :t7, after t6, 5min
-    写入 fund_nav     :t8, after t7, 1min
-    计算收盘汇总      :t9, after t8, 2min
-    推送汇总到微信    :t10, after t9, 1min
+    section 23:30收盘
+    拉取收盘数据      :t5, 23:30, 10m
+    写入market_daily  :t6, after t5, 2m
+    拉取基金净值      :t7, after t6, 5m
+    写入fund_nav      :t8, after t7, 1m
+    计算收盘汇总      :t9, after t8, 2m
+    推送汇总到微信    :t10, after t9, 1m
 ```
 
 ### 推送通知一览

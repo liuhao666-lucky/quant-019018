@@ -128,12 +128,14 @@ class TMTAlphaStrategy:
 
         return df
 
-    def process_day(self, t: int, df: pd.DataFrame, current_gain: float = 0.0) -> dict:
+    def process_day(self, t: int, df: pd.DataFrame, current_gain: float = 0.0,
+                    holding_days: int = 0) -> dict:
         """
         处理单个交易日，生成完整信号。
         t: 当前交易日在 DataFrame 中的索引
         df: prepare_data 处理后的 DataFrame
         current_gain: 真实持仓收益率（position_value / invested_capital - 1），默认 0 无持仓
+        holding_days: 持仓交易天数（用于时间止损判断），默认 0 无持仓
         返回: signal_dict
         """
         row = df.iloc[t]
@@ -212,6 +214,11 @@ class TMTAlphaStrategy:
         max_pos_ratio = bt.get("max_position_ratio", 1.0)
         max_allowed = total_capital * max_pos_ratio
 
+        # 预热期内使用更低的仓位上限，允许小仓位参与（减少踏空）
+        warmup_max_ratio = self.cfg.get("system", {}).get("warmup_max_position_ratio", 0.0)
+        if t < self.warmup_days and warmup_max_ratio > 0:
+            max_allowed = total_capital * warmup_max_ratio
+
         amount_before_cap = 0.0
         amount, channel, self.exec_state = execute_channel(
             score_eff, mkt_chg, v_today, v_ma20, excess_dd, t,
@@ -221,7 +228,8 @@ class TMTAlphaStrategy:
 
         # === 模块五：退出逻辑 ===
         exit_result, self.pos_state = check_exit(
-            df, t, cfg, self.pos_state, self.exec_state, current_gain
+            df, t, cfg, self.pos_state, self.exec_state, current_gain,
+            score_eff=score_eff, holding_days=holding_days
         )
 
         # === 综合决策 ===
@@ -244,13 +252,13 @@ class TMTAlphaStrategy:
             action = "sell"
             final_amount = amount
 
-        # 系统预热期限制仓位
-        if t < self.warmup_days and self.cfg.get("system", {}).get("allow_immature_signal", False) is False:
-            final_amount *= self.warmup_limit
+        # 预热期标记：backtest 据此限制仓位上限
+        warmup_active = (t < self.warmup_days)
 
         signal = {
             "trade_date": trade_date,
             "t": t,
+            "warmup_active": warmup_active,
             "mkt_chg": round(mkt_chg, 4),
             "r_fund": round(r_fund, 4),
             "excess_dd": round(excess_dd, 6),
@@ -273,6 +281,8 @@ class TMTAlphaStrategy:
             "warning": exit_result["warning"],
             "force_reduce": exit_result["force_reduce"],
             "trailing_stop": exit_result.get("trailing_stop", False),
+            "signal_decay": exit_result.get("signal_decay", False),
+            "time_stop": exit_result.get("time_stop", False),
             "threshold_adjust": exit_result["threshold_adjust"],
             "snapshot_used": not snapshot_fallback if self.use_snapshot else None,
         }

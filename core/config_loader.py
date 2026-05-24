@@ -11,8 +11,9 @@ CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
 # 全量默认值（与设计文档 YAML 完全对齐）
 _DEFAULTS = {
     "system": {
-        "warmup_days": 60,
+        "warmup_days": 20,
         "warmup_position_limit": 0.33,
+        "warmup_max_position_ratio": 0.35,
         "allow_immature_signal": False,
     },
     "benchmark": {
@@ -88,19 +89,30 @@ _DEFAULTS = {
         "nav_peak_reset_to_null": True,
         "trailing_stop_activate": 0.30,
         "trailing_stop_drawdown": 0.20,
+        # 信号衰减减仓
+        "signal_decay_enabled": True,
+        "signal_decay_sell_threshold": 20,
+        "signal_decay_sell_ratio": 0.50,
+        "signal_decay_cooldown_days": 5,
+        # 时间止损
+        "time_stop_enabled": True,
+        "time_stop_days": 60,
+        "time_stop_loss_only": True,
+        "time_stop_sell_ratio": 1.0,
     },
     "backtest": {
         "initial_capital": 1000,
-        "max_position_ratio": 1.0,
+        "max_position_ratio": 0.80,
         "total_capital": 1000,
         "use_snapshot": True,
         "preheat_days": 90,
         "start_date": None,
     },
     "execution": {
-        "m_max_normal": 500,
+        "m_max_normal": 200,
         "m_min_normal": 20,
-        "channel_a_power": 1.0,
+        "channel_a_power": 1.5,
+        "channel_a_threshold": 30,
         "channel_b_reboot_days": 10,
         "channel_c_chase_threshold": 0.6,
         "v_shape_max_allowed_ratio": 0.30,

@@ -60,7 +60,7 @@ RETRY_DELAY = 3
 def update_market_daily(trade_date: str, rows: list, index_code: str):
     """
     更新 market_daily 表（INSERT OR UPDATE）。
-    若记录已存在则更新收盘字段和 updated_at，不修改 created_at。
+    若记录已存在则更新收盘字段，不修改 created_at。
     若不存在则插入。
     """
     conn = _get_conn()
@@ -88,27 +88,26 @@ def update_market_daily(trade_date: str, rows: list, index_code: str):
                         change = COALESCE(?, change),
                         change_pct = ?,
                         volume = ?,
-                        amount = COALESCE(?, amount),
-                        updated_at = ?
+                        amount = COALESCE(?, amount)
                     WHERE trade_date = ? AND index_code = ?
                 """, (
                     r.get("open"), r.get("high"), r.get("low"),
                     r.get("close"), r.get("change"), r.get("change_pct"),
                     r.get("volume"), r.get("amount"),
-                    now_str, td, index_code,
+                    td, index_code,
                 ))
             else:
                 conn.execute("""
                     INSERT INTO market_daily
                     (trade_date, index_code, open, high, low, close,
-                     change, change_pct, volume, amount, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     change, change_pct, volume, amount, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     td, index_code,
                     r.get("open"), r.get("high"), r.get("low"), r.get("close"),
                     r.get("change"), r.get("change_pct"),
                     r.get("volume"), r.get("amount"),
-                    now_str, now_str,
+                    now_str,
                 ))
 
         conn.commit()

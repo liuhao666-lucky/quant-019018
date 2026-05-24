@@ -62,9 +62,10 @@ def execute_channel(score_eff: float, mkt_chg: float, v_today: float,
     ex = cfg.get("execution", {})
     vc = cfg.get("volume_control", {})
 
-    m_max = ex.get("m_max_normal", 500)
+    m_max = ex.get("m_max_normal", 200)
     m_min = ex.get("m_min_normal", 20)
-    channel_a_power = ex.get("channel_a_power", 1.0)
+    channel_a_power = ex.get("channel_a_power", 1.5)
+    channel_a_threshold = ex.get("channel_a_threshold", 30)
     v_gain = vc.get("v_shape_reversal_gain", 3.0)
     v_vol = vc.get("v_shape_reversal_vol", 1.2)
     v_cooldown = vc.get("v_shape_cooldown_days", 5)
@@ -95,8 +96,11 @@ def execute_channel(score_eff: float, mkt_chg: float, v_today: float,
                 return -sell, "D_stop", state  # 负数表示卖出
 
     # === 通道 A：常规顺势通道 ===
-    if score_eff >= 25:
-        amount = m_max * ((score_eff - 25) / 75) ** channel_a_power + m_min
+    if score_eff >= channel_a_threshold:
+        # 非线性金额公式：Score_eff 越高，金额增长越快
+        # amount = m_max * ((score_eff - threshold) / (100 - threshold)) ^ channel_a_power + m_min
+        effective_range = 100.0 - channel_a_threshold
+        amount = m_max * ((score_eff - channel_a_threshold) / effective_range) ** channel_a_power + m_min
         amount = max(amount, m_min)
         amount = min(amount, max_allowed)
         return amount, "A", state
