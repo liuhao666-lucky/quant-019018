@@ -23,6 +23,8 @@ class PositionState:
         # 时间止损：首次买入日期（用于计算持仓天数）
         self.first_buy_date = None       # 首次建仓日期 str
         self.time_stop_triggered = False # 是否已触发时间止损（防止重复触发）
+        # 趋势感知止盈：持仓期间浮盈最高点
+        self.gain_peak = 0.0            # 当前持仓周期内的最高收益率
 
 
 def get_view_attitude(cfg: dict) -> int:
@@ -63,35 +65,60 @@ def check_excess_dd_force(excess_dd: float, threshold_adjust: float,
 
 
 def check_take_profit(current_gain: float, t: int, cfg: dict,
-                      state: PositionState) -> tuple:
+                      state: PositionState, trend_strong: bool = False) -> tuple:
     """
-    阶梯止盈检查（基于真实持仓收益率）。
+    阶梯止盈检查（基于真实持仓收益率），支持趋势感知动态阈值。
 
-    返回: (sell_ratio, state)
-    sell_ratio > 0 表示需要卖出该比例的持仓。
+    强趋势判断（已由 strategy 层完成）：
+    - 净值 > MA40 且 5日收益 > 1%，或 (净值/MA40 - 1) > 5%
+
+    动态阈值：
+    - 强趋势：tp1 = min(40%, gain_peak × 0.80), tp2 = min(70%, gain_peak × 0.90)
+    - 非强趋势：tp1 = 25%, tp2 = 50%
+
+    返回: (sell_ratio, state, tp_tier)
+    tp_tier: 0=未触发, 1=一档, 2=二档（供日志用）
     """
     if t <= state.tp_cooldown_end:
-        return 0.0, state
+        return 0.0, state, 0
+
+    # 更新持仓浮盈最高点
+    if current_gain > state.gain_peak:
+        state.gain_peak = current_gain
 
     el = cfg.get("exit_logic", {})
-    tp1, sell1 = el.get("tp_level_1", 0.25), el.get("tp_sell_ratio_1", 0.33)
-    tp2, sell2 = el.get("tp_level_2", 0.50), el.get("tp_sell_ratio_2", 0.33)
+
+    if trend_strong:
+        # 动态阈值：不超过配置上限，也不超过历史峰值的 80%/90%
+        tp1_cfg = el.get("tp_level_1_strong", 0.40)
+        tp2_cfg = el.get("tp_level_2_strong", 0.70)
+        tp1 = min(tp1_cfg, state.gain_peak * 0.80) if state.gain_peak > 0 else tp1_cfg
+        tp2 = min(tp2_cfg, state.gain_peak * 0.90) if state.gain_peak > 0 else tp2_cfg
+        # 确保 tp2 > tp1
+        tp1 = min(tp1, tp2 - 0.05)
+    else:
+        tp1 = el.get("tp_level_1", 0.25)
+        tp2 = el.get("tp_level_2", 0.50)
+
+    sell1 = el.get("tp_sell_ratio_1", 0.33)
+    sell2 = el.get("tp_sell_ratio_2", 0.33)
 
     if current_gain >= tp2 and not state.tp2_triggered:
         state.tp_cooldown_end = t + el.get("cool_down_days", 5)
         state.tp2_triggered = True
-        return sell2, state
+        return sell2, state, 2
     elif current_gain >= tp1 and not state.tp1_triggered:
         state.tp_cooldown_end = t + el.get("cool_down_days", 5)
         state.tp1_triggered = True
-        return sell1, state
+        return sell1, state, 1
 
     # 跌落回成本线附近时重置止盈状态，允许开启下一轮网格
-    if current_gain < tp1 * 0.5:
+    if current_gain < 0.05:
         state.tp1_triggered = False
         state.tp2_triggered = False
+        state.gain_peak = 0.0
 
-    return 0.0, state
+    return 0.0, state, 0
 
 
 def check_trailing_stop(fund_nav: float, current_gain: float, cfg: dict,
@@ -126,6 +153,7 @@ def check_trailing_stop(fund_nav: float, current_gain: float, cfg: dict,
             # 清仓联动重置止盈网格
             state.tp1_triggered = False
             state.tp2_triggered = False
+            state.gain_peak = 0.0
             return 1.0, state
 
     return 0.0, state
@@ -199,13 +227,15 @@ def check_time_stop(holding_days: int, current_gain: float, cfg: dict,
 
 def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
                exec_state=None, current_gain: float = 0.0,
-               score_eff: float = 50.0, holding_days: int = 0) -> tuple:
+               score_eff: float = 50.0, holding_days: int = 0,
+               trend_strong: bool = False) -> tuple:
     """
     综合退出逻辑检查。
 
     参数:
       - score_eff: 当前信号压缩得分（用于信号衰减减仓判断）
       - holding_days: 持仓交易天数（用于时间止损判断）
+      - trend_strong: 策略层传入的趋势强度判断
 
     返回: (action_dict, pos_state)
     action_dict 包含:
@@ -214,8 +244,10 @@ def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
       - sell_ratio: float (止盈卖出比例)
       - action: str ("sell" / "hold")
       - trailing_stop: bool
-      - signal_decay: bool      # 是否由信号衰减触发
-      - time_stop: bool         # 是否由时间止损触发
+      - signal_decay: bool
+      - time_stop: bool
+      - tp_tier: int (0=未触发, 1=一档, 2=二档，供日志用)
+      - trend_strong: bool (回传供日志用)
       - excess_dd: float
       - threshold_adjust: float
     """
@@ -235,6 +267,7 @@ def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
     trailing_stop = False
     signal_decay = False
     time_stop = False
+    tp_tier = 0
 
     # 强制平仓（优先级最高）
     if force_reduce and t >= pos_state.forced_reduce_end:
@@ -254,7 +287,9 @@ def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
 
     # 止盈检查（仅在未触发强平且未触发时间止损时）
     if not force_reduce and not time_stop and current_gain > 0:
-        tp_ratio, pos_state = check_take_profit(current_gain, t, cfg, pos_state)
+        tp_ratio, pos_state, tp_tier = check_take_profit(
+            current_gain, t, cfg, pos_state, trend_strong
+        )
         if tp_ratio > 0:
             action = "sell"
             sell_ratio = tp_ratio
@@ -284,4 +319,6 @@ def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
         "trailing_stop": trailing_stop,
         "signal_decay": signal_decay,
         "time_stop": time_stop,
+        "tp_tier": tp_tier,
+        "trend_strong": trend_strong,
     }, pos_state

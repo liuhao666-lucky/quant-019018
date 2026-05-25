@@ -11,7 +11,7 @@ import pandas as pd
 
 from core.config_loader import get_config
 from model.model1_benchmark import (
-    compute_mkt_chg, compute_aux, compute_returns,
+    compute_mkt_chg, compute_returns,
     compute_mkt_chg_series, compute_aux_series,
     compute_excess_nav, compute_alpha_daily, compute_vix_proxy,
 )
@@ -27,6 +27,9 @@ from model.model5_intraday_filter import (
 )
 from model.model6_soft_compressor import ExecutionState, compute_score_eff, execute_channel
 from model.model7_exit_logic import PositionState, check_exit
+from model.model8_market_state import (
+    compute_market_temperature, get_market_mode, get_adaptive_params,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +129,42 @@ class TMTAlphaStrategy:
         ]
         df[cols_to_shift] = df[cols_to_shift].shift(1).ffill().bfill()
 
+        # === 趋势感知止盈：计算基金净值 40 日均线和 5 日收益率 ===
+        # 使用已 shift 的 fund_nav（即 t 时刻策略可观测的最新净值），无未来函数
+        tf_cfg = self.cfg.get("trend_filter", {})
+        trend_ma = tf_cfg.get("trend_ma_period", 40)
+        df["fund_ma40"] = df["fund_nav"].rolling(window=trend_ma, min_periods=trend_ma).mean()
+        df["fund_5d_return"] = df["fund_nav"].pct_change(periods=5) * 100  # 百分比
+
         return df
+
+    def _detect_trend_strength(self, row, cfg) -> bool:
+        """
+        趋势强度判断（放宽条件）。
+
+        强趋势条件（满足任一即可）：
+        1. 净值 > MA40 且近 5 日收益率 > 1%（从 2% 放宽）
+        2. 净值偏离 MA40 超过 5%（兜底：捕捉匀速慢涨行情）
+
+        返回: True = 强趋势
+        """
+        tf_cfg = cfg.get("trend_filter", {})
+        fund_nav_val = row["fund_nav"]
+        fund_ma40 = row.get("fund_ma40", fund_nav_val)
+        fund_5d_ret = row.get("fund_5d_return", 0.0)
+
+        if pd.isna(fund_ma40) or pd.isna(fund_5d_ret) or fund_ma40 <= 0:
+            return False
+
+        # 条件1：净值在 MA40 之上且 5 日收益 > 1%
+        strong_5d = tf_cfg.get("trend_strong_5d_return", 0.01) * 100  # 1% 转为百分比
+        cond1 = fund_nav_val > fund_ma40 and fund_5d_ret > strong_5d
+
+        # 条件2：净值偏离 MA40 超过 5%（兜底慢涨行情）
+        deviation_pct = (fund_nav_val / fund_ma40 - 1) * 100
+        cond2 = deviation_pct > 5.0
+
+        return cond1 or cond2
 
     def process_day(self, t: int, df: pd.DataFrame, current_gain: float = 0.0,
                     holding_days: int = 0) -> dict:
@@ -156,6 +194,11 @@ class TMTAlphaStrategy:
         r_semi = row.get("R_SEMI", 0)
         r_ne = row.get("R_NE", 0)
 
+        # === 市场温度自适应 ===
+        market_temp = compute_market_temperature(df, t, 20)
+        market_mode = get_market_mode(market_temp, cfg)
+        adaptive_params = get_adaptive_params(market_mode, cfg)
+
         # === 快照模式：优先使用 14:45 盘中数据 ===
         snapshot_fallback = False
         if self.use_snapshot and t >= self.warmup_days:
@@ -163,7 +206,6 @@ class TMTAlphaStrategy:
             snap = self.snapshot_map.get(trade_date)
             if snap:
                 self.snapshot_used += 1
-                # 用快照的盘中涨跌幅替换收盘涨跌幅
                 if snap.get("tmt_chg_pct") is not None:
                     mkt_chg = compute_mkt_chg(snap["tmt_chg_pct"], cfg)
                 if snap.get("tmt_volume") is not None:
@@ -185,10 +227,10 @@ class TMTAlphaStrategy:
             df, t, cfg, self.cooldown
         )
 
-        # === 模块二：趋势因子 → Final_Multiplier ===
-        trend_factor = compute_trend_factor(df, t, cfg)
+        # === 模块二：趋势因子 → Final_Multiplier（含市场自适应参数） ===
+        trend_factor = compute_trend_factor(df, t, cfg, adaptive_params)
         alpha_bonus = compute_alpha_bonus(excess_dd, cfg)
-        final_mult = compute_final_multiplier(trend_factor, alpha_bonus, cfg)
+        final_mult = compute_final_multiplier(trend_factor, alpha_bonus, cfg, adaptive_params)
 
         # === 模块二：基础评分 ===
         base = compute_base(mkt_chg, final_mult, cfg)
@@ -214,7 +256,7 @@ class TMTAlphaStrategy:
         max_pos_ratio = bt.get("max_position_ratio", 1.0)
         max_allowed = total_capital * max_pos_ratio
 
-        # 预热期内使用更低的仓位上限，允许小仓位参与（减少踏空）
+        # 预热期内使用更低的仓位上限
         warmup_max_ratio = self.cfg.get("system", {}).get("warmup_max_position_ratio", 0.0)
         if t < self.warmup_days and warmup_max_ratio > 0:
             max_allowed = total_capital * warmup_max_ratio
@@ -227,9 +269,13 @@ class TMTAlphaStrategy:
         amount_before_cap = amount
 
         # === 模块五：退出逻辑 ===
+        # 趋势感知：放宽条件 + 兜底判断
+        trend_strong = self._detect_trend_strength(row, cfg)
+
         exit_result, self.pos_state = check_exit(
             df, t, cfg, self.pos_state, self.exec_state, current_gain,
-            score_eff=score_eff, holding_days=holding_days
+            score_eff=score_eff, holding_days=holding_days,
+            trend_strong=trend_strong
         )
 
         # === 综合决策 ===
@@ -252,7 +298,7 @@ class TMTAlphaStrategy:
             action = "sell"
             final_amount = amount
 
-        # 预热期标记：backtest 据此限制仓位上限
+        # 预热期标记
         warmup_active = (t < self.warmup_days)
 
         signal = {
@@ -283,8 +329,13 @@ class TMTAlphaStrategy:
             "trailing_stop": exit_result.get("trailing_stop", False),
             "signal_decay": exit_result.get("signal_decay", False),
             "time_stop": exit_result.get("time_stop", False),
+            "tp_tier": exit_result.get("tp_tier", 0),
+            "trend_strong": trend_strong,
             "threshold_adjust": exit_result["threshold_adjust"],
             "snapshot_used": not snapshot_fallback if self.use_snapshot else None,
+            # 市场温度自适应
+            "market_temp": round(market_temp, 2),
+            "market_mode": market_mode,
         }
 
         return signal

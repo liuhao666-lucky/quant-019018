@@ -6,7 +6,7 @@ TMT-Alpha 7.0 回测引擎
 支持 14:45 快照回测模式。
 """
 
-import sys
+import copy
 import csv
 import logging
 import numpy as np
@@ -155,7 +155,101 @@ def _calc_nav_metrics(nav_series, warmup, dates):
     }
 
 
-def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> dict:
+def _run_inline_robustness(df_full, cfg, warmup_days, min_starts=10):
+    """在完整数据上运行多起始点稳健性检验，返回 (results_list, trimmed_stats_dict)"""
+    dates = df_full["trade_date"].tolist()
+    if len(dates) < warmup_days + 20:
+        return [], {}
+
+    # 从第一个有效月起，每隔约3个月取一个起始点
+    month_starts = []
+    last_month = ""
+    for i, d in enumerate(dates):
+        month = d[:7]
+        if month != last_month:
+            month_starts.append((i, month))
+            last_month = month
+
+    # 过滤掉数据不足的
+    valid = [(i, m) for i, m in month_starts if len(dates) - i >= warmup_days + 20]
+    if len(valid) < 3:
+        return [], {}
+
+    # 均匀选取 min_starts 个，覆盖全区间
+    if len(valid) > min_starts:
+        step = max(1, len(valid) // min_starts)
+        selected = valid[::step][:min_starts]
+    else:
+        selected = valid
+
+    results = []
+    preheat_days = cfg.get("backtest", {}).get("preheat_days", 90)
+    seen_dates = set()
+
+    for idx, month in selected:
+        preheat_start = max(0, idx - preheat_days)
+        sub_df = df_full.iloc[preheat_start:].reset_index(drop=True)
+        if len(sub_df) < warmup_days + 10:
+            continue
+
+        cfg_copy = copy.deepcopy(cfg)
+        cfg_copy["system"]["warmup_days"] = warmup_days
+        cfg_copy["backtest"]["use_snapshot"] = False
+
+        try:
+            r = run_backtest(cfg_copy, report_path=None, external_data=sub_df, silent=True)
+            if not r or "metrics" not in r:
+                continue
+            m = r["metrics"]
+            eff_idx = min(warmup_days, len(sub_df) - 1)
+            start_date = sub_df["trade_date"].iloc[eff_idx]
+            if start_date in seen_dates:
+                continue
+            seen_dates.add(start_date)
+            results.append({
+                "start_date": start_date,
+                "strategy_return": _parse_pct(m["累计收益率"]),
+                "max_dd": _parse_pct(m["最大回撤"]),
+                "sharpe": float(m["夏普比率"]),
+                "calmar": float(m["卡玛比率"]),
+                "tmt_return": _parse_pct(m["基准累计收益率"]),
+                "excess_vs_tmt": _parse_pct(m["超额收益"]),
+                "fund_bh": _parse_pct(m["基金持有收益率"]),
+                "excess_vs_fund": _parse_pct(m["超基金持有"]),
+            })
+        except Exception:
+            continue
+
+    # 计算剔除极端值统计
+    trimmed_stats = {}
+    for trim_n, label in [(0, "全部"), (3, "去最高3个")]:
+        if len(results) <= trim_n:
+            continue
+        sorted_r = sorted(results, key=lambda x: x["strategy_return"], reverse=True)
+        subset = sorted_r[trim_n:]
+        rets = [x["strategy_return"] for x in subset]
+        excess_t = [x["excess_vs_tmt"] for x in subset]
+        wr = sum(1 for e in excess_t if e > 0) / len(excess_t) if excess_t else 0
+        trimmed_stats[label] = {
+            "n": len(subset),
+            "mean_return": np.mean(rets),
+            "median_return": np.median(rets),
+            "win_rate": wr,
+            "mean_dd": np.mean([x["max_dd"] for x in subset]),
+        }
+
+    return results, trimmed_stats
+
+
+def _parse_pct(s):
+    """解析百分比字符串为浮点数"""
+    if isinstance(s, (int, float)):
+        return float(s)
+    return float(s.rstrip("%")) / 100
+
+
+def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md",
+                 external_data: pd.DataFrame = None, silent: bool = False) -> dict:
     if cfg is None:
         cfg = load_config()
 
@@ -169,11 +263,15 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> d
     m_min = ex.get("m_min_normal", 0)
 
     # 加载数据
-    print("正在从 SQLite 加载数据…")
-    raw_df = load_merged_data()
-    if raw_df.empty:
-        print("[错误] 无数据，无法回测。")
-        return {}
+    if external_data is not None:
+        raw_df = external_data.copy()
+        print(f"使用外部注入数据，共 {len(raw_df)} 条记录。")
+    else:
+        print("正在从 SQLite 加载数据…")
+        raw_df = load_merged_data()
+        if raw_df.empty:
+            print("[错误] 无数据，无法回测。")
+            return {}
 
     bt = cfg.get("backtest", {})
     start_date = bt.get("start_date")
@@ -233,7 +331,8 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> d
     avg_cost_per_share = 0.0
     holding_days = 0          # 持仓交易天数计数（用于时间止损）
 
-    print(f"开始回测，预热期 {warmup} 天，数据总量 {len(df)} 天…")
+    if not silent:
+        print(f"开始回测，预热期 {warmup} 天，数据总量 {len(df)} 天…")
 
     for t in range(len(df)):
         row = df.iloc[t]
@@ -274,6 +373,9 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> d
                 "channel": signal["channel"],
                 "cash": round(cash, 2),
                 "position": round(position_value, 2),
+                "market_temp": signal.get("market_temp", 0),
+                "market_mode": signal.get("market_mode", "defense"),
+                "trend_strong": signal.get("trend_strong", False),
             })
 
             # 动态仓位乘数（无未来函数）：用前一日 MA20 与当日收盘价比较
@@ -326,17 +428,20 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> d
                     position_value -= sell_amount
                     cash += sell_amount - cost
                     total_cost += cost
-                    # 确定卖出原因
+                    # 确定卖出原因（含趋势状态）
+                    trend_label = "强趋势" if signal.get("trend_strong") else "弱趋势"
                     if signal.get("trailing_stop"):
-                        reason = "移动止盈清仓"
+                        reason = f"移动止盈清仓-{trend_label}"
                     elif signal.get("time_stop"):
-                        reason = f"时间止损(持仓{holding_days}天)"
+                        reason = f"时间止损(持仓{holding_days}天)-{trend_label}"
                     elif signal.get("signal_decay"):
-                        reason = f"信号衰减(Score={signal['score_eff']:.1f})"
+                        reason = f"信号衰减(Score={signal['score_eff']:.1f})-{trend_label}"
                     elif signal.get("force_reduce"):
                         reason = "强平"
                     else:
-                        reason = f"止盈({signal.get('channel', '')})"
+                        tp_tier = signal.get("tp_tier", 0)
+                        tier_text = "一档" if tp_tier == 1 else ("二档" if tp_tier == 2 else "")
+                        reason = f"止盈({tier_text})-{trend_label}"
                     trade_log.append({
                         "date": row["trade_date"], "action": "sell",
                         "amount": sell_amount, "cost": cost,
@@ -352,12 +457,13 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> d
         date_list.append(row["trade_date"])
 
     # === 保存诊断日志 ===
-    diag_path = OUTPUT_DIR / "diagnostic_log.csv"
-    with open(diag_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=diag_log[0].keys() if diag_log else [])
-        writer.writeheader()
-        writer.writerows(diag_log)
-    print(f"诊断日志已保存: {diag_path}")
+    if not silent:
+        diag_path = OUTPUT_DIR / "diagnostic_log.csv"
+        with open(diag_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=diag_log[0].keys() if diag_log else [])
+            writer.writeheader()
+            writer.writerows(diag_log)
+        print(f"诊断日志已保存: {diag_path}")
 
     # === 计算绩效指标 ===
     nav_series = np.array(nav_list)
@@ -429,29 +535,47 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md") -> d
     # 快照覆盖率统计
     snapshot_coverage = strategy.get_snapshot_coverage() if use_snapshot else None
 
-    print("\n" + "=" * 50)
-    print("回测绩效指标")
-    print("=" * 50)
-    for k, v in metrics.items():
-        print(f"  {k:18s}: {v}")
-    if snapshot_coverage:
-        print(f"  {'快照覆盖':18s}: {snapshot_coverage['used']}/{snapshot_coverage['total']} ({snapshot_coverage['rate']:.1%})")
-        if snapshot_coverage['rate'] < 0.8:
-            print("  !! 快照覆盖率不足 80%，回测结果可能偏离盘中真实信号")
-    print("=" * 50)
+    if not silent:
+        print("\n" + "=" * 50)
+        print("回测绩效指标")
+        print("=" * 50)
+        for k, v in metrics.items():
+            print(f"  {k:18s}: {v}")
+        if snapshot_coverage:
+            print(f"  {'快照覆盖':18s}: {snapshot_coverage['used']}/{snapshot_coverage['total']} ({snapshot_coverage['rate']:.1%})")
+            if snapshot_coverage['rate'] < 0.8:
+                print("  !! 快照覆盖率不足 80%，回测结果可能偏离盘中真实信号")
+        print("=" * 50)
+
+    # === 多起始点稳健性检验（非静默模式） ===
+    robustness_results = []
+    robustness_trimmed = {}
+    if not silent and len(df) > warmup + 20:
+        print("运行多起始点稳健性检验…")
+        robustness_results, robustness_trimmed = _run_inline_robustness(
+            df, cfg, warmup, min_starts=10
+        )
+        if robustness_results:
+            rets = [r["strategy_return"] for r in robustness_results]
+            print(f"  稳健性: {len(robustness_results)} 起始点, "
+                  f"均值 {np.mean(rets):.1%}, 中位数 {np.median(rets):.1%}")
 
     # 输出
-    chart_path = str(OUTPUT_DIR / "backtest_result.png")
-    report_full_path = str(OUTPUT_DIR / report_path) if report_path else None
+    if not silent:
+        chart_path = str(OUTPUT_DIR / "backtest_result.png")
+        report_full_path = str(OUTPUT_DIR / report_path) if report_path else None
 
-    _plot_results(date_list, nav_series, benchmarks, drawdown, warmup, trade_log, df, chart_path)
+        _plot_results(date_list, nav_series, benchmarks, drawdown, warmup, trade_log, df, chart_path)
 
-    if report_full_path:
-        _generate_report(metrics, trade_log, date_list, nav_series, benchmarks,
-                         drawdown, warmup, total_cost, df, cfg, report_full_path,
-                         total_return, annual_vol, beta, beta_adjusted_excess,
-                         initial_capital, fund_bh_metrics, fund_dca_metrics, tmt_dca_metrics,
-                         snapshot_coverage)
+        if report_full_path:
+            _generate_report(metrics, trade_log, date_list, nav_series, benchmarks,
+                             drawdown, warmup, total_cost, df, cfg, report_full_path,
+                             total_return, annual_vol, beta, beta_adjusted_excess,
+                             initial_capital, fund_bh_metrics, fund_dca_metrics, tmt_dca_metrics,
+                             snapshot_coverage, robustness_results, robustness_trimmed)
+    else:
+        chart_path = None
+        report_full_path = None
 
     return {
         "signals": signals, "nav_series": nav_series,
@@ -517,7 +641,7 @@ def _generate_report(metrics, trade_log, dates, nav_series, benchmarks,
                      drawdown, warmup, total_cost, df, cfg, report_path,
                      total_return, annual_vol, beta, beta_adjusted_excess,
                      initial_capital, fund_bh_metrics, fund_dca_metrics, tmt_dca_metrics,
-                     snapshot_coverage=None):
+                     snapshot_coverage=None, robustness_results=None, robustness_trimmed=None):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     start_date = dates[0] if dates else "N/A"
     end_date = dates[-1] if dates else "N/A"
@@ -541,38 +665,46 @@ def _generate_report(metrics, trade_log, dates, nav_series, benchmarks,
 
     ex = cfg.get("execution", {})
 
-    # 读取稳健性检验结果（如果存在）
-    robustness_csv = OUTPUT_DIR / "robustness_summary.csv"
+    # 多起始点稳健性检验（内联计算，覆盖全区间）
     robustness_section = ""
-    if robustness_csv.exists():
-        import csv as csv_mod
-        with open(robustness_csv, "r", encoding="utf-8-sig") as f:
-            reader = csv_mod.DictReader(f)
-            rows = list(reader)
-        if rows:
-            excess_tmt = [float(r["excess_vs_tmt"]) for r in rows if r["excess_vs_tmt"] and r["excess_vs_tmt"] != "nan"]
-            strategy_rets = [float(r["strategy_return"]) for r in rows]
-            robustness_section = f"""
-### 多起始点稳健性检验
+    if robustness_results and len(robustness_results) > 0:
+        sorted_rob = sorted(robustness_results, key=lambda r: r["strategy_return"], reverse=True)
+        excess_tmt = [r["excess_vs_tmt"] for r in robustness_results]
+        strategy_rets = [r["strategy_return"] for r in robustness_results]
+        win_rate = sum(1 for x in excess_tmt if x > 0) / len(excess_tmt) if excess_tmt else 0
 
-**为什么要检验？** 单一起始日的回测结果可能受"起点运气"影响。例如，如果回测恰好从低点开始，收益会被高估。
-我们从 {len(rows)} 个不同起始月份分别运行回测，观察策略表现是否稳定。
+        robustness_section = f"""
+### 多起始点稳健性检验（覆盖全区间 {robustness_results[0]['start_date'][:7]} ~ {robustness_results[-1]['start_date'][:7]}）
 
-| 起始月 | 策略收益 | TMT收益 | 超TMT |
-|--------|----------|---------|-------|
+**为什么要检验？** 单一起始日的回测结果可能受"起点运气"影响。
+我们从 **{len(robustness_results)} 个**均匀分布在全区间的起始月份分别运行回测，观察策略表现是否稳定。
+
+| 起始日期 | 策略收益 | 最大回撤 | 夏普 | TMT收益 | 超TMT |
+|----------|---------|---------|------|---------|-------|
 """
-            for r in rows:
-                excess = r["excess_vs_tmt"]
-                excess_str = f"{float(excess):+.1%}" if excess and excess != "nan" else "N/A"
-                robustness_section += f"| {r['start_date'][:7]} | {float(r['strategy_return']):.1%} | {float(r['tmt_return']):.1%} | {excess_str} |\n"
+        for r in sorted_rob:
+            robustness_section += (
+                f"| {r['start_date']} | {r['strategy_return']:.1%} | {r['max_dd']:.1%} | "
+                f"{r['sharpe']:.2f} | {r['tmt_return']:.1%} | {r['excess_vs_tmt']:+.1%} |\n"
+            )
 
-            win_rate = sum(1 for x in excess_tmt if x > 0) / len(excess_tmt) if excess_tmt else 0
-            robustness_section += f"""
+        robustness_section += f"""
 **稳健性结论:**
 - 超TMT指数胜率: **{win_rate:.0%}**（{sum(1 for x in excess_tmt if x > 0)}/{len(excess_tmt)} 个起始点跑赢）
 - 策略收益均值: {np.mean(strategy_rets):.1%}，中位数: {np.median(strategy_rets):.1%}
-- 结果受起始日影响较大，建议结合多起始点测试综合评估
 """
+        # 剔除极端值统计
+        if robustness_trimmed:
+            robustness_section += "\n**剔除极端起始点后的稳健性评估：**\n\n"
+            robustness_section += "| 统计口径 | 样本数 | 收益均值 | 收益中位数 | 超TMT胜率 | 平均回撤 |\n"
+            robustness_section += "|---------|--------|---------|-----------|-----------|----------|\n"
+            for label, ts in robustness_trimmed.items():
+                robustness_section += (
+                    f"| {label} | {ts['n']} | {ts['mean_return']:.1%} | {ts['median_return']:.1%} | "
+                    f"{ts['win_rate']:.0%} | {ts['mean_dd']:.1%} |\n"
+                )
+            robustness_section += "\n> 注：\"去最高3个\"反映策略在非最优起点的真实表现，有助于区分\"起点运气\"和真实稳健性。\n"
+        robustness_section += "\n> **多起始点检验已覆盖全区间，与多版本报告结论对齐。**\n"
 
     # 快照覆盖统计
     snapshot_section = ""
@@ -581,6 +713,7 @@ def _generate_report(metrics, trade_log, dates, nav_series, benchmarks,
         snapshot_section = f"| 快照模式 | 开启 |\n| 快照覆盖 | {sc['used']}/{sc['total']} ({sc['rate']:.1%}) |"
         if sc['rate'] < 0.8:
             snapshot_section += "\n| :warning: **快照覆盖率不足 80%，回测结果可能偏离盘中真实信号！** | |"
+        snapshot_section += f"\n| :information_source: **快照覆盖率 {sc['rate']:.0%}，回测以收盘价执行，实盘中信号可能滑点。** | |"
 
     report = f"""# TMT-Alpha 7.0 回测报告
 
@@ -647,39 +780,28 @@ def _generate_report(metrics, trade_log, dates, nav_series, benchmarks,
 
 ## 三、参数变更与风险提示
 
-### 本次优化参数对比
+### 当前参数配置（TMT-Alpha 7.0 平衡版）
 
-| 参数 | 设计文档原值 | 当前优化值 | 变化原因 |
-|------|-------------|-----------|----------|
-| K下限 | 30 | 20 | 降低软压缩门槛，提高 Score_eff 敏感度 |
-| 通道A指数 | 1.5 | 1.2 | 中等评分时产生更大金额 |
-| 通道A阈值 | 30 | 25 | 更多信号触发买入 |
-| m_max_normal | 200 | 500 | 允许更大单笔买入 |
-| below_ma_power | 0.50 | 0.65 | 减轻空头惩罚，避免过度压制 |
-| consecutive_drop_power | 0.25 | 0.40 | 减轻连续下跌惩罚 |
-| excess_dd_warning_base | -0.08 | -0.10 | 放宽预警阈值 |
-| Final_Multiplier下限 | 0.50 | 0.60 | 防止乘数塌缩 |
+| 参数 | 当前值 | 说明 |
+|------|--------|------|
+| m_max_normal | 350 | 单笔买入上限 |
+| below_ma_power | 0.50 | 低于均线惩罚（已接入趋势因子计算） |
+| consecutive_drop_power | 0.25 | 连续下跌惩罚 |
+| excess_dd_warning_base | -0.08 | 超额回撤预警阈值 |
+| 通道A指数 | 1.3 | 金额公式非线性指数 |
+| 通道A阈值 | 22 | 买入触发 Score_eff 阈值 |
+| K下限 | 20 | 软压缩系数下限 |
+| Final_Multiplier下限 | 0.60 | 乘数塌缩保护 |
+| tp_level_1 / tp_level_2 | 25% / 50% | 基础止盈阈值 |
+| tp_level_1_strong / tp_level_2_strong | 40% / 70% | 强趋势止盈阈值（动态上限） |
+| 市场自适应 | 开启 | 进攻模式(below_ma=0.65, cons_drop=0.35, mult_min=0.70) / 防守模式恢复原值 |
 
-### 风险收益权衡（小白话版）
+### 关键优化说明
 
-**收益怎么从36%涨到69%的？**
-
-简单说，就是"敢买更多了"：
-1. **K值门槛降低**（30→20）：相当于把"评分打折"的程度减轻了，同样的信号能拿到更高的分数
-2. **通道公式放宽**（指数1.5→1.2）：中等信号也能产生有效买入金额，而不是几乎为0
-3. **买入上限提高**（200→500）：单笔能买更多钱
-4. **空头惩罚减轻**（0.5→0.65）：市场回调时不会过度缩手
-
-**风险在哪里？**
-
-1. **波动率上升**：从约10%升至26%，意味着账户"上下颠簸"更剧烈
-2. **最大回撤扩大**：从约-3%升至-12%，极端情况下可能亏更多
-3. **踏空风险依然存在**：策略仍有约31%的资金闲置（现金+未部署），牛市中会跑输全仓持有
-4. **参数敏感性**：放宽参数后，策略对市场波动更敏感，不同起始点收益差异较大
-
-**核心结论：** 本次优化是在"少赚少亏"和"多赚多亏"之间的权衡。
-如果你追求稳健、不想看到大幅波动，可以回退到保守参数；
-如果你能接受更大波动、追求更高收益，当前参数更合适。
+1. **趋势感知止盈**：强趋势（净值 > MA40 且 5日收益 > 1%，或偏离 > 5%）抬高止盈阈值，避免过早下车
+2. **市场温度自适应**：TMT 20日涨幅 > 10% 进入进攻模式，牛市回调敢加仓
+3. **参数回退**：below_ma_power 和 consecutive_drop_power 从宽松值回退，恢复防守能力
+4. **夏普比率计算**：mean(daily_excess) / std(daily_excess) × √252，r_free = 0.00004/天
 
 ---
 

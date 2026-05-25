@@ -4,13 +4,16 @@ trend_factor.py
 - Trend_Factor：相对动态趋势因子
 - Alpha_Bonus：Alpha 对冲增幅器
 - Final_Multiplier：综合乘数（含 1.1 双重共振嘉奖）
+
+支持 adaptive_params 覆盖（来自 market_state 模块）。
 """
 
 import numpy as np
 import pandas as pd
 
 
-def compute_trend_factor(df: pd.DataFrame, t: int, cfg: dict) -> float:
+def compute_trend_factor(df: pd.DataFrame, t: int, cfg: dict,
+                         adaptive_params: dict = None) -> float:
     """
     相对动态趋势因子 Trend_Factor。
 
@@ -22,9 +25,11 @@ def compute_trend_factor(df: pd.DataFrame, t: int, cfg: dict) -> float:
     Trend_Factor_base:
       若 P_today > MA60 且 dev_max <= Threshold_abs → 1.0
       若 P_today > MA60 且 dev_max > Threshold_abs  → 0.5 + 0.5 * (1 - ratio)
-      若 P_today <= MA60                             → 0.5
+      若 P_today <= MA60                             → below_ma_power
 
-    慢熊熔断：连续 5 日收阴 → 0.25
+    慢熊熔断：连续 5 日收阴 → consecutive_drop_power
+
+    adaptive_params 可覆盖 below_ma_power 和 consecutive_drop_power。
     """
     tf = cfg.get("trend_filter", {})
     ma_period = tf.get("ma_period", 60)
@@ -32,7 +37,15 @@ def compute_trend_factor(df: pd.DataFrame, t: int, cfg: dict) -> float:
     epsilon = tf.get("epsilon", 0.001)
     no_peak_ratio = tf.get("no_peak_threshold_ratio", 0.005)
     consec_limit = tf.get("consecutive_drop_limit", 5)
-    consec_power = tf.get("consecutive_drop_power", 0.25)
+
+    # 自适应参数覆盖
+    if adaptive_params:
+        below_ma_power = adaptive_params.get("below_ma_power", tf.get("below_ma_power", 0.50))
+        consec_power = adaptive_params.get("consecutive_drop_power",
+                                           tf.get("consecutive_drop_power", 0.25))
+    else:
+        below_ma_power = tf.get("below_ma_power", 0.50)
+        consec_power = tf.get("consecutive_drop_power", 0.25)
 
     close = df["tmt_close"].values
 
@@ -62,7 +75,7 @@ def compute_trend_factor(df: pd.DataFrame, t: int, cfg: dict) -> float:
             break
 
     if consec_drop >= consec_limit:
-        return consec_power  # 0.25
+        return consec_power
 
     # Trend_Factor_base 计算
     if p_today > ma60:
@@ -72,7 +85,7 @@ def compute_trend_factor(df: pd.DataFrame, t: int, cfg: dict) -> float:
             ratio = min(1.0, (p_today - ma60) / dev_max)
             trend_base = 0.5 + 0.5 * (1 - ratio)
     else:
-        trend_base = 0.5
+        trend_base = below_ma_power
 
     return trend_base
 
@@ -99,28 +112,33 @@ def compute_alpha_bonus(excess_dd: float, cfg: dict) -> float:
 
 
 def compute_final_multiplier(trend_factor: float, alpha_bonus: float,
-                             cfg: dict) -> float:
+                             cfg: dict, adaptive_params: dict = None) -> float:
     """
     综合乘数判定 Final_Multiplier（核心：双重共振嘉奖）。
 
     公式：
     若 Alpha_Bonus == 2.0:
-        Final_Multiplier = max(0.75, min(1.1, Trend_Factor × Alpha_Bonus))
+        Final_Multiplier = max(multiplier_min, min(1.1, Trend_Factor × Alpha_Bonus))
     否则:
-        Final_Multiplier = min(1.0, Trend_Factor × Alpha_Bonus)
+        Final_Multiplier = max(multiplier_min, min(1.0, Trend_Factor × Alpha_Bonus))
 
-    当 Trend_Factor=1.0 且 Alpha_Bonus=2.0 时，乘数允许触及 1.1。
+    multiplier_min 由 adaptive_params 控制（进攻模式 0.70，防守模式 0.60）。
     """
     tf = cfg.get("trend_filter", {})
     floor = tf.get("alpha_bonus_stalemate_floor", 0.75)
     cap = tf.get("alpha_bonus_resonance_cap", 1.1)
 
+    # 自适应乘数下限
+    if adaptive_params:
+        multiplier_min = adaptive_params.get("multiplier_min", 0.60)
+    else:
+        multiplier_min = 0.60
+
     raw = trend_factor * alpha_bonus
 
     if alpha_bonus == 2.0:
-        # 双重共振：允许突破 1.0，上限 1.1，下限 0.75
+        # 双重共振：允许突破 1.0，上限 1.1，下限 floor
         return max(floor, min(cap, raw))
     else:
-        # 非共振：下限 0.6，上限 1.0
-        return max(0.6, min(1.0, raw))
-        return min(1.0, raw)
+        # 非共振：下限 multiplier_min，上限 1.0
+        return max(multiplier_min, min(1.0, raw))

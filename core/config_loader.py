@@ -50,13 +50,17 @@ _DEFAULTS = {
         "recent_peak_days": 20,
         "epsilon": 0.001,
         "no_peak_threshold_ratio": 0.005,
-        "below_ma_power": 0.75,
+        "below_ma_power": 0.50,
         "consecutive_drop_limit": 5,
-        "consecutive_drop_power": 0.40,
+        "consecutive_drop_power": 0.25,
         "alpha_bonus_high_threshold": -0.02,
         "alpha_bonus_mid_threshold": -0.05,
         "alpha_bonus_stalemate_floor": 0.75,
         "alpha_bonus_resonance_cap": 1.1,
+        # 趋势感知止盈：趋势强度判断参数
+        "trend_ma_period": 40,
+        "trend_strong_5d_return": 0.02,
+        "trend_weak_5d_return": 0.0,
     },
     "volume_control": {
         "volume_ma_period": 20,
@@ -76,7 +80,7 @@ _DEFAULTS = {
     },
     "exit_logic": {
         "view_attitude": 1,
-        "excess_dd_warning_base": -0.10,
+        "excess_dd_warning_base": -0.08,
         "excess_dd_force_base": -0.15,
         "attitude_adjust_step": 0.05,
         "tp_level_1": 0.25,
@@ -85,6 +89,9 @@ _DEFAULTS = {
         "tp_reset_method": "reset_to_current_nav",
         "tp_level_2": 0.50,
         "tp_sell_ratio_2": 0.33,
+        # 趋势感知止盈：强趋势时抬高的止盈阈值
+        "tp_level_1_strong": 0.40,
+        "tp_level_2_strong": 0.70,
         "force_liquidation_ignore_fee": True,
         "nav_peak_reset_to_null": True,
         "trailing_stop_activate": 0.30,
@@ -111,11 +118,18 @@ _DEFAULTS = {
     "execution": {
         "m_max_normal": 200,
         "m_min_normal": 20,
-        "channel_a_power": 1.5,
+        "channel_a_power": 1.3,
         "channel_a_threshold": 30,
         "channel_b_reboot_days": 10,
         "channel_c_chase_threshold": 0.6,
         "v_shape_max_allowed_ratio": 0.30,
+    },
+    "market_state": {
+        "attack_threshold": 10.0,
+        "attack_below_ma_power": 0.65,
+        "attack_consecutive_drop_power": 0.35,
+        "attack_multiplier_min": 0.70,
+        "defense_multiplier_min": 0.60,
     },
     "wechat": {
         "enabled": True,

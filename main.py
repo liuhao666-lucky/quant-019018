@@ -196,6 +196,13 @@ def run_daily():
         print("[错误] TMT 指数数据缺失，可能非交易日，退出。")
         return
 
+    # 交易日校验：API 返回的 tradeDate 必须与今天一致
+    api_trade_date = index_data["tmt"].get("trade_date", "")
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    if api_trade_date != today_str:
+        print(f"[提示] API 返回日期 {api_trade_date} ≠ 今天 {today_str}，非交易日或数据未更新，跳过信号。")
+        return
+
     # 第二步：加载历史数据 + 追加当日实时行 → 计算信号
     print("\n[2/3] 加载数据并计算信号…")
     raw_df = load_merged_data()

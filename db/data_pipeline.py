@@ -10,7 +10,7 @@ import re
 import json
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 # ==================== 配置 ====================
@@ -217,10 +217,10 @@ def fetch_fund_nav() -> list:
     return result["data"]["market"]["history"]
 
 
-def fetch_fund_nav_history(fund_code: str = FUND_CODE, years: int = 2) -> list:
+def fetch_fund_nav_history(fund_code: str = FUND_CODE) -> list:
     """
     从新浪 netWorth 接口拉取基金历史净值（JSONP 格式）。
-    years: 拉取年数，t=7 对应约 2 年。
+    t=11 拉取全部历史数据。
     返回 list[dict]，字段: trade_date, net_value, acc_value, daily_return
     """
     headers = {
@@ -232,8 +232,8 @@ def fetch_fund_nav_history(fund_code: str = FUND_CODE, years: int = 2) -> list:
     session.get("https://fund.sina.com.cn/", headers=headers, timeout=10)
 
     ts = int(time.time() * 1000)
-    # t 参数控制时间范围: t=7 约 2 年
-    t_param = 7 if years >= 2 else (3 if years >= 1 else 1)
+    # t=11 拉取全部历史（覆盖 2017 年至今）
+    t_param = 11
     callback = f"jQuery_{ts}"
     url = (f"{FUND_NETWORTH_URL}?callback={callback}"
            f"&fundcode={fund_code}&t={t_param}&_={ts}")
@@ -487,9 +487,9 @@ def initialize_database():
     conn.close()
     print("[OK] 数据表已创建\n")
 
-    # 计算日期范围
-    end_date = datetime.now().strftime("%Y%m%d")
-    start_date = (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
+    # 固定日期范围: 2017-12-29 ~ 2026-05-22（覆盖全部历史）
+    start_date = "20171229"
+    end_date = "20260522"
     print(f"指数历史数据范围: {start_date} ~ {end_date}\n")
 
     session = _create_session()
@@ -617,6 +617,12 @@ def load_merged_data() -> pd.DataFrame:
     md["trade_date"] = md["trade_date"].apply(_normalize_date_str)
     if not fn.empty:
         fn["trade_date"] = fn["trade_date"].apply(_normalize_date_str)
+
+    # 去重：防止多次 init 产生的重复行导致合并笛卡尔积
+    if not md.empty:
+        md = md.drop_duplicates(subset=["trade_date", "index_code"], keep="last")
+    if not fn.empty:
+        fn = fn.drop_duplicates(subset=["trade_date"], keep="last")
 
     # 以 000998 (TMT) 为主表，构建基础 DataFrame
     tmt_code = "000998"
