@@ -112,17 +112,40 @@ def compute_action_ratio(df: pd.DataFrame, t: int, cfg: dict,
         cooldown.tick()
         return ratio, cooldown
 
-    # === 第一层：Alpha 豁免与绝对亏损防锯齿 ===
+    # === 第一层：Alpha 豁免与分段式绝对亏损防锯齿 ===
+    # 优先级: P0 单日暴跌 > P1 系统性风险(0.5) > P2 黄金坑(1.3) > P3 常规防守(0.8)
     if dm.get("waive_positive_alpha", True) and cum_alpha > 0:
+
+        # P0: 单日暴跌（最高优先级，覆盖所有分段逻辑）
         abs_loss_thresh = dm.get("absolute_loss_trap_threshold", -0.02)
-        abs_dd_thresh = dm.get("absolute_dd_trap_threshold", -0.08)
         loss_ratio = dm.get("absolute_loss_action_ratio", 0.7)
         cooldown_days = dm.get("absolute_loss_cooldown_days", 3)
-
-        if fund_dd_20d <= abs_dd_thresh or r_fund <= abs_loss_thresh * 100:
-            # 触发降额 + 冷却锁
+        if r_fund <= abs_loss_thresh * 100:
             cooldown.lock(cooldown_days, loss_ratio)
             return loss_ratio, cooldown
+
+        # P1-P3: 基于 fund_dd_20d 的分段逻辑
+        systemic_dd = dm.get("trap_systemic_dd_threshold", -0.15)
+        systemic_ratio = dm.get("trap_systemic_action_ratio", 0.5)
+        golden_upper = dm.get("trap_golden_pit_dd_upper", -0.10)
+        golden_lower = dm.get("trap_golden_pit_dd_lower", -0.15)
+        golden_ratio = dm.get("trap_golden_pit_action_ratio", 1.3)
+        golden_cooldown = dm.get("trap_golden_pit_cooldown_days", 1)
+        normal_defense_dd = dm.get("absolute_dd_trap_threshold", -0.08)
+        normal_defense_ratio = dm.get("trap_normal_defense_action_ratio", 0.8)
+
+        if fund_dd_20d <= systemic_dd:
+            # P1: 系统性风险 <= -15% → 重防守 0.5
+            cooldown.lock(cooldown_days, systemic_ratio)
+            return systemic_ratio, cooldown
+        elif golden_lower < fund_dd_20d <= golden_upper:
+            # P2: 黄金坑反弹区 (-15%, -10%] → 加倍买入 1.3
+            cooldown.lock(golden_cooldown, golden_ratio)
+            return golden_ratio, cooldown
+        elif fund_dd_20d <= normal_defense_dd:
+            # P3: 常规防守 (-10%, -8%] → 轻度打折 0.8
+            cooldown.lock(cooldown_days, normal_defense_ratio)
+            return normal_defense_ratio, cooldown
         else:
             return 1.0, cooldown
 

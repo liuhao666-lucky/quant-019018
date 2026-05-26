@@ -1,6 +1,6 @@
 """
 multi_version_backtest.py
-TMT-Alpha 7.0 多版本对比回测（含市场自适应 + 趋势感知止盈修复 + 熊市压力测试）
+TMT-Alpha 2.0 多版本对比回测（含市场自适应 + 趋势感知止盈修复 + 熊市压力测试）
 
 用法:
     python multi_version_backtest.py
@@ -291,7 +291,7 @@ def compute_trimmed_stats(results, trim_n=0):
 def main():
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print("=" * 70)
-    print("TMT-Alpha 7.0 多版本对比回测（含市场自适应 + 趋势感知止盈修复）")
+    print("TMT-Alpha 2.0 多版本对比回测（含市场自适应 + 趋势感知止盈修复）")
     print(f"运行时间: {now_str}")
     print("=" * 70)
 
@@ -472,7 +472,7 @@ def generate_comparison_report(all_results, all_robustness,
                                 corrections_log, now_str,
                                 interval_1, interval_2, interval_3):
     lines = []
-    lines.append("# TMT-Alpha 7.0 多版本对比回测报告（含市场自适应 + 趋势感知止盈修复）")
+    lines.append("# TMT-Alpha 2.0 多版本对比回测报告（含市场自适应 + 趋势感知止盈修复）")
     lines.append(f"\n> 生成时间: {now_str}")
     lines.append("> :warning: 快照覆盖率 0%，回测以收盘价执行，**实盘中信号可能滑点**。")
 
@@ -808,7 +808,7 @@ def generate_comparison_report(all_results, all_robustness,
     lines.append("4. m_max=350 在保守和进取间取得平衡")
     lines.append("")
     lines.append("---\n")
-    lines.append(f"*报告由 TMT-Alpha 7.0 多版本对比引擎自动生成*")
+    lines.append(f"*报告由 TMT-Alpha 2.0 多版本对比引擎自动生成*")
 
     return "\n".join(lines)
 

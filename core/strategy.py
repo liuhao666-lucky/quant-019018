@@ -1,6 +1,6 @@
 """
 strategy.py
-TMT-Alpha 7.0 主策略类
+TMT-Alpha 2.0 主策略类
 逐日串联所有模块，输出每日信号 dict。
 支持 14:45 快照回测模式。
 """
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 class TMTAlphaStrategy:
     """
-    TMT-Alpha 7.0 主策略类。
+    TMT-Alpha 2.0 主策略类。
 
     使用方法:
         strategy = TMTAlphaStrategy(cfg)
@@ -260,8 +260,17 @@ class TMTAlphaStrategy:
         # === 模块四：执行通道 ===
         bt = cfg.get("backtest", {})
         total_capital = bt.get("total_capital", 1000)
-        max_pos_ratio = bt.get("max_position_ratio", 1.0)
-        max_allowed = total_capital * max_pos_ratio
+        base_max_pos_ratio = bt.get("max_position_ratio", 1.0)
+        ex = cfg.get("execution", {})
+
+        # 市场自适应：进攻模式下放大单笔上限和仓位上限
+        m_max_adapted = ex.get("m_max_normal", 200)
+        max_pos_adapted = base_max_pos_ratio
+        if market_mode == "attack":
+            m_max_adapted *= adaptive_params.get("m_max_multiplier", 1.0)
+            max_pos_adapted = adaptive_params.get("max_position_ratio", base_max_pos_ratio)
+
+        max_allowed = total_capital * max_pos_adapted
 
         # 预热期内使用更低的仓位上限
         warmup_max_ratio = self.cfg.get("system", {}).get("warmup_max_position_ratio", 0.0)
@@ -271,7 +280,8 @@ class TMTAlphaStrategy:
         amount_before_cap = 0.0
         amount, channel, self.exec_state = execute_channel(
             score_eff, mkt_chg, v_today, v_ma20, excess_dd, t,
-            max_allowed, cfg, self.exec_state
+            max_allowed, cfg, self.exec_state,
+            m_max_override=m_max_adapted,
         )
         amount_before_cap = amount
 
@@ -343,6 +353,8 @@ class TMTAlphaStrategy:
             # 市场温度自适应
             "market_temp": round(market_temp, 2),
             "market_mode": market_mode,
+            "max_position_ratio": max_pos_adapted,
+            "m_max_adapted": m_max_adapted,
         }
 
         return signal

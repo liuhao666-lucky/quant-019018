@@ -1,6 +1,6 @@
 """
 backtest.py
-TMT-Alpha 7.0 回测引擎
+TMT-Alpha 2.0 回测引擎
 从 SQLite 加载数据，运行完整策略回测，输出绩效指标和图表。
 含多基准对比：策略净值、基金买入持有、基金定投、TMT指数。
 支持 14:45 快照回测模式。
@@ -383,7 +383,7 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md",
             if signal.get("warmup_active") and warmup_max_ratio > 0:
                 current_max_position = warmup_max_ratio
             else:
-                base_max_pos = max_pos_ratio
+                base_max_pos = signal.get("max_position_ratio", max_pos_ratio)
                 tmt_close_val = row.get("tmt_close", 0)
                 tmt_ma20_yesterday = row.get("tmt_ma20_yesterday", 0)
                 if pd.notna(tmt_ma20_yesterday) and tmt_ma20_yesterday > 0 and tmt_close_val > tmt_ma20_yesterday:
@@ -393,7 +393,7 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md",
 
             # 所有买卖决策由 strategy 统一产出，backtest 仅负责执行
             if action == "buy" and amount > 0:
-                amount = min(amount, m_max)
+                amount = min(amount, signal.get("m_max_adapted", m_max))
                 if amount < 1.0:
                     pass
                 else:
@@ -588,7 +588,7 @@ def run_backtest(cfg: dict = None, report_path: str = "backtest_report.md",
 def _plot_results(dates, nav_series, benchmarks, drawdown, warmup, trade_log, df, chart_path):
     """绘制净值曲线（多基准）和回撤曲线"""
     fig, axes = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
-    fig.suptitle("TMT-Alpha 7.0 Backtest Result", fontsize=14, fontweight="bold")
+    fig.suptitle("TMT-Alpha 2.0 Backtest Result", fontsize=14, fontweight="bold")
     x = range(len(dates))
 
     ax1 = axes[0]
@@ -715,7 +715,7 @@ def _generate_report(metrics, trade_log, dates, nav_series, benchmarks,
             snapshot_section += "\n| :warning: **快照覆盖率不足 80%，回测结果可能偏离盘中真实信号！** | |"
         snapshot_section += f"\n| :information_source: **快照覆盖率 {sc['rate']:.0%}，回测以收盘价执行，实盘中信号可能滑点。** | |"
 
-    report = f"""# TMT-Alpha 7.0 回测报告
+    report = f"""# TMT-Alpha 2.0 回测报告
 
 > 生成时间: {now}
 
@@ -780,7 +780,7 @@ def _generate_report(metrics, trade_log, dates, nav_series, benchmarks,
 
 ## 三、参数变更与风险提示
 
-### 当前参数配置（TMT-Alpha 7.0 平衡版）
+### 当前参数配置（TMT-Alpha 2.0 平衡版）
 
 | 参数 | 当前值 | 说明 |
 |------|--------|------|
@@ -895,7 +895,7 @@ def _generate_report(metrics, trade_log, dates, nav_series, benchmarks,
 
 ---
 
-*报告由 TMT-Alpha 7.0 回测引擎自动生成*
+*报告由 TMT-Alpha 2.0 回测引擎自动生成*
 """
 
     with open(report_path, "w", encoding="utf-8") as f:

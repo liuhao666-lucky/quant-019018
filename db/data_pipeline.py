@@ -1,6 +1,6 @@
 """
 data_pipeline.py
-TMT-Alpha 7.0 数据管道 —— 直连 SQLite，供后续量化策略调用。
+TMT-Alpha 2.0 数据管道 —— 直连 SQLite，供后续量化策略调用。
 依赖: requests, pandas, sqlite3 (标准库)
 """
 

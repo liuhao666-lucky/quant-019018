@@ -8,7 +8,7 @@ __pycache__/
 /db/tmt_alpha.db
 
 # Runtime output and logs
-/output/
+# /output/
 *.log
 
 # Local configs and secrets

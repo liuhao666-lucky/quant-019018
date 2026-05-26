@@ -52,17 +52,20 @@ def compute_score_eff(score_raw: float, vix_10d: float, vix_avg_60d: float,
 def execute_channel(score_eff: float, mkt_chg: float, v_today: float,
                     v_ma20: float, excess_dd: float, t: int,
                     max_allowed: float, cfg: dict,
-                    state: ExecutionState) -> tuple:
+                    state: ExecutionState,
+                    m_max_override: float = None) -> tuple:
     """
     四轨资金执行通道。
 
     返回: (amount, channel_type, state)
     channel_type: "A" / "B" / "C" / "D" / "none"
+
+    m_max_override: 市场自适应覆盖 m_max_normal（进攻模式放大30%）
     """
     ex = cfg.get("execution", {})
     vc = cfg.get("volume_control", {})
 
-    m_max = ex.get("m_max_normal", 200)
+    m_max = m_max_override if m_max_override is not None else ex.get("m_max_normal", 200)
     m_min = ex.get("m_min_normal", 20)
     channel_a_power = ex.get("channel_a_power", 1.5)
     channel_a_threshold = ex.get("channel_a_threshold", 30)

@@ -1,6 +1,6 @@
 """
 closing_collector.py
-TMT-Alpha 7.0 — 当天 23:30 收盘数据采集脚本
+TMT-Alpha 2.0 — 当天 23:30 收盘数据采集脚本
 
 定时任务由外部触发（如 cron/Task Scheduler），脚本仅实现采集逻辑。
 获取收盘后的确切数据，更新 market_daily 和 fund_nav 表。

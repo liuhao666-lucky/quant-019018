@@ -1,4 +1,4 @@
-# TMT-Alpha 7.0 量化策略
+# TMT-Alpha 2.0 量化策略
 
 易方达信息产业混合C (019018) 的量化信号系统与回测框架。
 ## ⚠️ 重要声明
@@ -9,6 +9,46 @@
 - 使用者需自行承担所有投资风险。作者不对因使用本模型产生的任何直接或间接损失负责。
 - 模型依赖的因子可能会失效，回测结果不代表实际业绩。投资前请务必独立判断，并咨询专业持牌机构。
 - 本仓库公开的代码、数据和说明仅用于交流学习，严禁用于商业用途或向他人提供付费投资建议。
+
+---
+
+## 🏆 核心业绩展示与进化历程 (v1.0 vs v2.0)
+
+> **导读**：TMT-Alpha 策略从基础的 1.0 版本进化至当前的 2.0 版本（平衡pro版），在维持回撤基本不变的前提下，通过对抄底逻辑、趋势感知止盈和资金利用率的深度优化，实现了收益和夏普比率的飞跃。
+
+### 1. 核心指标矩阵对比
+
+| 绩效指标 | TMT-Alpha 1.0 (平衡版) | TMT-Alpha 2.0 (平衡Pro版) | **进化表现** |
+|----------|------------------------|---------------------------|----------------|
+| **累计收益率** | **266.77%** | **308.81%** | 📈 **暴增 +42.04%** |
+| **最大回撤** | -16.88% | **-18.15%** | 🛡️ **仅扩大 1.27% (风控稳定)** |
+| **夏普比率** | 2.179 | **2.232** | 💎 **性价比更优** |
+| **卡玛比率** | 15.808 | **17.010** | 🚀 **收益回撤比更高** |
+| vs 买入持有超额 | -79.84% | **-37.81%** | 🐅 **牛市追击，大幅缩窄差距** |
+| vs 基金定投超额 | 10.37% | **52.40%** | 💰 **显著跑赢懒人投资** |
+| **买入次数** | 119 | **81** | 🎯 **抄底更精准，少动多赚** |
+| **卖出次数** | 27 | **20** | 牢牢锁住主升浪，拒绝卖飞 |
+
+### 2. 净值曲线直观对比
+
+<table style="width: 100%; text-align: center; border-collapse: collapse;">
+  <tr>
+    <th style="width: 50%;"><b>TMT-Alpha 1.0 (优化前)</b></th>
+    <th style="width: 50%;"><b>TMT-Alpha 2.0 (优化后)</b></th>
+  }
+  <tr>
+    <td><img src="output/backtest_result_v1.png" alt="TMT-Alpha 1.0 净值曲线图" width="100%"></td>
+    <td><img src="output/backtest_result.png" alt="TMT-Alpha 2.0 净值曲线图" width="100%"></td>
+  }
+</table>
+
+### 3. 进化总结
+
+1.  **解决了“牛市资金拖累（Cash Drag）”**：2.0 版本通过“市场自适应（进攻模式）”在牛市动态放宽仓位上限和买入额度，解决了 1.0 版本因为太守规矩导致大量现金闲置、严重跑输满仓基准的问题。
+2.  **解决了”黄金坑抄底不足”**：1.0 只是僵化地”跌了打折防锯齿”；2.0 引入非线性”分段式抄底”（P0 单日暴跌 → P1 系统性风险 0.5x → P2 黄金坑 1.3x 加倍 → P3 常规防守 0.8x），在回撤跌透至高弹性区间（如 -10%）时敢于重拳出击，吃到了超额Alpha。
+3.  **解决了“牛市频繁卖飞”**：2.0 将固定一刀切止盈升级为“趋势感知阶梯止盈”，强趋势中动态抬高目标位，大幅减少了卖出次数（27→20），将每一次止盈都做到了极致性价比。
+
+📄 **深度测评报告**：[点击查看 多版本对比回测报告 (含熊市压力测试与多起点稳健性检验)](output/multi_version_comparison.md)
 ## 一、架构总览
 
 ```mermaid
@@ -87,13 +127,26 @@ flowchart LR
 | 文件 | 职责 | 关键输出 |
 |------|------|----------|
 | `model1_benchmark.py` | 基准重构：Mkt_Chg、R_Aux、Excess_NAV、Excess_DD、VIX | 法定主锚、超额指标 |
-| `model2_drift_monitor.py` | 漂移雷达：相关性监控、MAE、绝对亏损陷阱 | Action_Ratio |
+| `model2_drift_monitor.py` | 漂移雷达：相关性监控、MAE、分段式防锯齿（P0→P3 四级） | Action_Ratio |
 | `model3_trend_factor.py` | 趋势因子：MA60乖离、below_ma 空头惩罚、连续下跌惩罚、Alpha共振 | Final_Multiplier |
 | `model4_base_scorer.py` | 基础评分：f(x) 非线性映射 | Base 评分 |
 | `model5_intraday_filter.py` | 量价过滤：波动率折扣、收缩/极值/偏离补偿 | Omega / Storm / τ |
 | `model6_soft_compressor.py` | 软压缩与执行通道：K·tanh + 四通道分流 | Score_eff / Channel |
 | `model7_exit_logic.py` | 退出逻辑：超额回撤预警/强平 + 趋势感知阶梯止盈 + 移动止盈 + 时间止损 | warning / force_reduce |
 | `model8_market_state.py` | 市场温度自适应：TMT 20日涨幅 → 进攻/防守模式动态调参 | adaptive_params |
+
+### 分段式防锯齿（model2，v2.0 核心升级）
+
+v1.0 的绝对亏损防锯齿是"一刀切"逻辑（触发则统一打折），v2.0 升级为四级优先级分段系统，根据回撤深度差异化应对：
+
+| 优先级 | 触发条件 | Action_Ratio | 含义 |
+|--------|---------|-------------|------|
+| **P0** | 基金单日跌幅 ≤ -2%（绝对值） | 0.70 | 单日暴跌，最高优先级，触发即锁仓 |
+| **P1** | 20日超额回撤 ≤ -15% | 0.50 | 系统性风险，重防守，大幅缩量 |
+| **P2** | 20日超额回撤 ∈ (-15%, -10%] | **1.30** | 黄金坑反弹区，加倍买入吃超额Alpha |
+| **P3** | 20日超额回撤 ∈ (-10%, -8%] | 0.80 | 常规防守，轻度打折控制风险 |
+
+> **设计意图**：v1.0 在回撤 -10% 时仍在打折，错失黄金坑反弹。v2.0 在跌透到高弹性区间时反向加倍（1.3x），实现"别人恐惧我贪婪"的量化表达。P0 优先级最高，可以覆盖所有下级逻辑。
 
 ---
 
@@ -118,10 +171,12 @@ flowchart LR
 
 根据 TMT 指数过去 20 个交易日累计涨幅，动态调整核心参数：
 
-| 模式 | 触发条件 | below_ma_power | consecutive_drop_power | multiplier_min |
-|------|---------|---------------|----------------------|----------------|
-| 🟢 进攻 | TMT 20日涨幅 > 10% | 0.65 | 0.35 | 0.70 |
-| 🔵 防守 | TMT 20日涨幅 ≤ 10% | 0.50 | 0.25 | 0.60 |
+| 模式 | 触发条件 | below_ma_power | consecutive_drop_power | multiplier_min | m_max_multiplier | max_position_ratio |
+|------|---------|---------------|----------------------|----------------|-----------------|-------------------|
+| 🟢 进攻 | TMT 20日涨幅 > 10% | 0.65 | 0.35 | 0.70 | 1.30 | 0.95 |
+| 🔵 防守 | TMT 20日涨幅 ≤ 10% | 0.50 | 0.25 | 0.60 | 1.00 | 0.85 |
+
+**v2.0 新增**：进攻模式下 `m_max_multiplier=1.30` 将单笔买入上限放大 30%，`max_position_ratio=0.95` 将仓位上限从 85% 提升至 95%，彻底解决牛市中"有钱没处花"的 Cash Drag 问题。
 
 设计意图：牛市中回调不缩手，敢于加仓缩小与买入持有的差距；熊市中恢复保守参数控制回撤。
 
@@ -434,6 +489,13 @@ crontab -e
 | `benchmark.equity_weight` | float | 法定主锚权益权重，默认 0.70 |
 | `benchmark.deposit_daily_rate` | float | 现金日利率 |
 | `drift_monitor.corr_threshold` | float | 漂移关联系数阈值 |
+| `drift_monitor.absolute_loss_trap_threshold` | float | P0 单日暴跌阈值，默认 -0.02 |
+| `drift_monitor.trap_systemic_dd_threshold` | float | P1 系统性风险回撤阈值，默认 -0.15 |
+| `drift_monitor.trap_systemic_action_ratio` | float | P1 系统性风险动作比率（0.5 = 缩量一半） |
+| `drift_monitor.trap_golden_pit_dd_upper` | float | P2 黄金坑回撤上界，默认 -0.10 |
+| `drift_monitor.trap_golden_pit_dd_lower` | float | P2 黄金坑回撤下界，默认 -0.15 |
+| `drift_monitor.trap_golden_pit_action_ratio` | float | P2 黄金坑加倍比率（1.3 = 加量30%） |
+| `drift_monitor.trap_normal_defense_action_ratio` | float | P3 常规防守比率（0.8 = 打八折） |
 | `trend_filter.ma_period` | int | 趋势均线周期，默认 60 |
 | `volume_control.storm_discount_value` | float | 风暴折扣值 |
 | `exit_logic.excess_dd_warning_base` | float | 超额回撤预警线，默认 -0.10 |
@@ -446,6 +508,8 @@ crontab -e
 | `exit_logic.time_stop_days` | int | 持仓超过此天数触发时间止损 |
 | `market_state.attack_threshold` | float | 进攻模式触发阈值（TMT 20日涨幅） |
 | `market_state.attack_below_ma_power` | float | 进攻模式空头惩罚 |
+| `market_state.attack_m_max_multiplier` | float | 进攻模式单笔买入上限倍数（默认 1.30，即放大30%） |
+| `market_state.attack_max_position_ratio` | float | 进攻模式仓位上限（默认 0.95，即95%仓位） |
 | `execution.m_max_normal` | int | 单笔买入上限 |
 | `backtest.initial_capital` | int | 回测初始资金 |
 | `backtest.use_snapshot` | bool | 是否使用 14:45 快照回测 |
@@ -463,7 +527,7 @@ crontab -e
 `main.py` → `send_signal_notification()` → 交易建议 + 风控状态：
 
 ```
-## TMT-Alpha 7.0 每日信号
+## TMT-Alpha 2.0 每日信号
 日期: 2026-03-24
 
 | 指标 | 数值 | 白话解释 |
@@ -485,7 +549,7 @@ crontab -e
 `closing_collector.py` → `send_closing_summary()` → 市场回顾 + 信号复盘 + 风控评级：
 
 ```
-## TMT-Alpha 7.0 收盘汇总
+## TMT-Alpha 2.0 收盘汇总
 日期: 2026-03-24
 
 今日市场
@@ -581,3 +645,4 @@ A: 正常。所有建表语句都是 `CREATE TABLE IF NOT EXISTS`，不会重复
 
 **Q: 回测和多版本报告数据对不上？**
 检查 `config.yaml` 中 `warmup_days` 是否一致。回测用 8 天 vs 多版本用 60 天会导致收益差异 50%+（预热不足时指标未成熟）。长区间建议统一用 60。排查：`python -c "from core.config_loader import load_config; print(load_config()['system']['warmup_days'])"`
+

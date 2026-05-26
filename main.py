@@ -1,6 +1,6 @@
 """
 main.py
-TMT-Alpha 7.0 实盘主程序
+TMT-Alpha 2.0 实盘主程序
 每日 14:45 运行: 拉取实时指数 → 写入快照表 snapshot_1445 → 计算信号 → 企业微信推送
 
 注意: main.py 不写入 market_daily 和 fund_nav。

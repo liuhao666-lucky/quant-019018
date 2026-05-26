@@ -98,7 +98,7 @@ def send_signal_notification(signal_dict: dict, cfg: dict = None):
         alert_lines.append(f"> 🔻 **绝对亏损防锯齿已触发**：Action_Ratio={action_ratio:.2f}，买入金额打折")
     alert_section = "\n".join(alert_lines)
 
-    content = f"""## 📊 TMT-Alpha 7.0 每日信号
+    content = f"""## 📊 TMT-Alpha 2.0 每日信号
 
 **日期**: {trade_date}
 
@@ -190,7 +190,7 @@ def send_closing_summary(summary: dict, cfg: dict = None):
     # 数据状态
     status_text = "✅ 正常" if data_ok else "⚠️ 部分失败"
 
-    content = f"""## 📈 TMT-Alpha 7.0 收盘汇总
+    content = f"""## 📈 TMT-Alpha 2.0 收盘汇总
 
 **日期**: {trade_date}
 

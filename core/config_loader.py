@@ -44,6 +44,14 @@ _DEFAULTS = {
         "absolute_dd_trap_threshold": -0.08,
         "absolute_loss_action_ratio": 0.7,
         "absolute_loss_cooldown_days": 3,
+        # 分段式防锯齿
+        "trap_systemic_dd_threshold": -0.15,
+        "trap_systemic_action_ratio": 0.5,
+        "trap_golden_pit_dd_upper": -0.10,
+        "trap_golden_pit_dd_lower": -0.15,
+        "trap_golden_pit_action_ratio": 1.3,
+        "trap_golden_pit_cooldown_days": 1,
+        "trap_normal_defense_action_ratio": 0.8,
     },
     "trend_filter": {
         "ma_period": 60,
@@ -129,6 +137,8 @@ _DEFAULTS = {
         "attack_below_ma_power": 0.65,
         "attack_consecutive_drop_power": 0.35,
         "attack_multiplier_min": 0.70,
+        "attack_m_max_multiplier": 1.30,
+        "attack_max_position_ratio": 0.95,
         "defense_multiplier_min": 0.60,
     },
     "wechat": {
