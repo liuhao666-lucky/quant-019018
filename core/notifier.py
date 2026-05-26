@@ -78,14 +78,6 @@ def send_signal_notification(signal_dict: dict, cfg: dict = None):
     action_map = {"buy": "🟢 买入", "sell": "🔴 卖出", "hold": "⚪ 观望"}
     action_text = action_map.get(action, action)
 
-    # 预警/熔断标记
-    alert_lines = []
-    if warning:
-        alert_lines.append("> ⚠️ **超额回撤预警已触发**")
-    if force_reduce:
-        alert_lines.append("> 🚨 **强制平仓已触发**")
-    alert_section = "\n".join(alert_lines)
-
     # 通道颜色标记
     channel_emoji = {"A": "🟢A", "B": "🟡B", "C": "🟠C", "D": "🔴D"}
     channel_text = channel_emoji.get(channel, channel)
@@ -102,6 +94,8 @@ def send_signal_notification(signal_dict: dict, cfg: dict = None):
         alert_lines.append("> ⚠️ **超额回撤预警已触发**：基金持续跑输基准，新买入信号力度打折")
     if force_reduce:
         alert_lines.append("> 🚨 **强制平仓已触发**：超额回撤触及硬止损线，必须减仓")
+    if action_ratio < 1.0:
+        alert_lines.append(f"> 🔻 **绝对亏损防锯齿已触发**：Action_Ratio={action_ratio:.2f}，买入金额打折")
     alert_section = "\n".join(alert_lines)
 
     content = f"""## 📊 TMT-Alpha 7.0 每日信号

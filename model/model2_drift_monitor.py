@@ -101,10 +101,10 @@ def compute_action_ratio(df: pd.DataFrame, t: int, cfg: dict,
     reboot_ratio = dm.get("reboot_reduce_ratio", 0.6)
     block_thresh = dm.get("action_block_threshold", 0.50)
 
-    # 读取当前行的预计算指标
-    cum_alpha = df["Cum_Alpha_20d"].iloc[t]
-    fund_dd_20d = df["Fund_DD_20d"].iloc[t]
-    r_fund = df["R_fund"].iloc[t]
+    # 读取当前行的预计算指标（优先使用 _live 列，14:45 可观测数据未经 shift）
+    cum_alpha = df.get("Cum_Alpha_20d_live", df["Cum_Alpha_20d"]).iloc[t]
+    fund_dd_20d = df.get("Fund_DD_20d_live", df["Fund_DD_20d"]).iloc[t]
+    r_fund = df.get("R_fund_live", df["R_fund"]).iloc[t]
 
     # 冷却期内直接返回锁定值
     if cooldown.is_cooling:

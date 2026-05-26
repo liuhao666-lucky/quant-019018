@@ -144,11 +144,13 @@ def _fetch_all_indices():
     return snapshot, index_data
 
 
-def _append_today_row(df: pd.DataFrame, index_data: dict) -> pd.DataFrame:
+def _append_today_row(df: pd.DataFrame, index_data: dict, fund_est: float = None) -> pd.DataFrame:
     """
     将当天 14:45 实时数据追加为 DataFrame 的最后一行。
     market_daily 不含当天数据（由 23:30 closing_collector 写入），
     因此需要手动构造当天行来驱动信号计算。
+
+    fund_est: 天天基金估算净值，用于计算当日估算涨跌幅（驱动防锯齿逻辑）
     """
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -167,8 +169,9 @@ def _append_today_row(df: pd.DataFrame, index_data: dict) -> pd.DataFrame:
         else:
             row[f"{prefix}_close"] = data.get("close")
 
-    # 基金净值留空，prepare_data 中 ffill 会用昨日净值填充
-    row["fund_nav"] = None
+    # 基金净值：优先使用 14:45 估算净值（用于防锯齿等实时逻辑）
+    # 如果未获取到，留 None 由 prepare_data 中 ffill 兜底
+    row["fund_nav"] = fund_est if fund_est else None
     row["fund_acc_value"] = None
     row["fund_daily_return"] = None
 
@@ -210,7 +213,8 @@ def run_daily():
         print("[错误] 无历史数据，请先执行 python db/data_pipeline.py init")
         return
 
-    raw_df = _append_today_row(raw_df, index_data)
+    fund_est = snapshot.get("fund_nav_estimated") if snapshot else None
+    raw_df = _append_today_row(raw_df, index_data, fund_est)
 
     strategy = TMTAlphaStrategy(cfg)
     df = strategy.prepare_data(raw_df)

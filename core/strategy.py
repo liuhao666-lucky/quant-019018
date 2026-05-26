@@ -119,7 +119,14 @@ class TMTAlphaStrategy:
 
         # === 剔除未来函数：隔离 14:45 信号计算与 15:00 真实结算 ===
         # 实盘中 14:45 无法获取当日 fund_nav / Excess_DD 等收盘后数据，
-        # 因此将所有基金衍生列后移 1 天：t 时刻只能看到 t-1 的数据
+        # === 保存未 shift 的实时列（用于防锯齿、14:45 可观测逻辑）===
+        # 这些列在 T 日 14:45 可通过快照数据估算，回测中以 T 日收盘数据模拟
+        df["R_fund_live"] = df["R_fund"].copy()
+        df["Fund_DD_20d_live"] = df["Fund_DD_20d"].copy()
+        df["Cum_Alpha_20d_live"] = df["Cum_Alpha_20d"].copy()
+
+        # 将所有基金衍生列后移 1 天：t 时刻只能看到 t-1 的数据
+        # 注意：R_fund / Fund_DD_20d / Cum_Alpha_20d 的 _live 版本已保存，不参与 shift
         df["R_fund_actual"] = df["R_fund"]
         df["fund_nav_actual"] = df["fund_nav"]
         df["Excess_DD_actual"] = df["Excess_DD"]
@@ -182,7 +189,7 @@ class TMTAlphaStrategy:
         # === 基础数据 ===
         trade_date = row["trade_date"]
         mkt_chg = row["Mkt_Chg"]
-        r_fund = row["R_fund"]
+        r_fund = row.get("R_fund_live", row["R_fund"])
         excess_dd = row["Excess_DD"]
         tmt_volume = row["tmt_volume"]
         v_ma20 = row["V_MA20"] if pd.notna(row["V_MA20"]) else tmt_volume
