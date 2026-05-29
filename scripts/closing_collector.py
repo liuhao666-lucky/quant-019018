@@ -18,6 +18,7 @@ import re
 import logging
 import argparse
 import requests
+import pandas as pd
 from pathlib import Path
 from datetime import datetime
 
@@ -27,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from db.data_pipeline import (
     _get_conn, _normalize_date_str, _create_session,
     fetch_index_history, _parse_history_rows,
-    fetch_fund_nav_history, save_fund_nav,
+    fetch_fund_nav_history, save_fund_nav, load_snapshot_1445,
 )
 from core.config_loader import load_config
 from core.notifier import send_closing_summary
@@ -217,22 +218,31 @@ def _build_closing_summary(trade_date: str, data_ok: bool) -> dict:
         has_snapshot = not snap_df.empty
         tmt_intraday = snap_df.iloc[0]["tmt_chg_pct"] if has_snapshot else None
 
-        # 14:45 信号复盘：用快照数据重新跑一次 process_day
+        # 14:45 信号复盘：优先从快照表读取已存的 14:45 信号
         signal_action = "-"
         signal_channel = "-"
         signal_amount = 0
         if has_snapshot:
-            try:
-                snap = snap_df.iloc[0].to_dict()
-                snap_strategy = TMTAlphaStrategy(cfg, snapshot_map={trade_date: snap})
-                snap_df_prep = snap_strategy.prepare_data(raw_df.copy())
-                t = len(snap_df_prep) - 1
-                signal = snap_strategy.process_day(t, snap_df_prep)
-                signal_action = signal.get("action", "-")
-                signal_channel = signal.get("channel", "-")
-                signal_amount = signal.get("amount", 0)
-            except Exception as e:
-                logger.warning(f"信号复盘失败: {e}")
+            snap_row = snap_df.iloc[0]
+            saved_action = snap_row.get("signal_action") if "signal_action" in snap_df.columns else None
+            if pd.notna(saved_action) and saved_action is not None and str(saved_action) not in ("", "None", "nan"):
+                # 直接从快照读取（与 14:45 完全一致，避免收盘数据差异导致金额漂移）
+                signal_action = str(saved_action)
+                signal_channel = str(snap_row.get("signal_channel", "-"))
+                signal_amount = float(snap_row.get("signal_amount", 0)) if pd.notna(snap_row.get("signal_amount")) else 0
+            else:
+                # 快照中无信号数据（旧版兼容），回退重算
+                try:
+                    snap = snap_row.to_dict()
+                    snap_strategy = TMTAlphaStrategy(cfg, snapshot_map={trade_date: snap})
+                    snap_df_prep = snap_strategy.prepare_data(raw_df.copy())
+                    t = len(snap_df_prep) - 1
+                    signal = snap_strategy.process_day(t, snap_df_prep)
+                    signal_action = signal.get("action", "-")
+                    signal_channel = signal.get("channel", "-")
+                    signal_amount = signal.get("amount", 0)
+                except Exception as e:
+                    logger.warning(f"信号复盘失败: {e}")
 
         return {
             "trade_date": trade_date,

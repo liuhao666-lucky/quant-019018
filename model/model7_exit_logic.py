@@ -7,6 +7,16 @@ exit_logic.py
 """
 
 
+def _redemption_fee_rate(holding_days: int) -> float:
+    """阶梯式赎回费率：0-6天 1.5%，7-29天 0.5%，30天+ 0%"""
+    if holding_days < 7:
+        return 0.015
+    elif holding_days < 30:
+        return 0.005
+    else:
+        return 0.0
+
+
 class PositionState:
     """持仓状态（在 backtest / strategy 间共享）"""
 
@@ -65,16 +75,11 @@ def check_excess_dd_force(excess_dd: float, threshold_adjust: float,
 
 
 def check_take_profit(current_gain: float, t: int, cfg: dict,
-                      state: PositionState, trend_strong: bool = False) -> tuple:
+                      state: PositionState, trend_strong: bool = False,
+                      holding_days: int = 0, market_mode: str = "defense") -> tuple:
     """
-    阶梯止盈检查（基于真实持仓收益率），支持趋势感知动态阈值。
-
-    强趋势判断（已由 strategy 层完成）：
-    - 净值 > MA40 且 5日收益 > 1%，或 (净值/MA40 - 1) > 5%
-
-    动态阈值：
-    - 强趋势：tp1 = min(40%, gain_peak × 0.80), tp2 = min(70%, gain_peak × 0.90)
-    - 非强趋势：tp1 = 25%, tp2 = 50%
+    阶梯止盈检查（基于真实持仓收益率），支持趋势感知动态阈值和市场自适应卖出比例。
+    赎回费率已纳入考量：有效阈值 = 基础阈值 + 赎回费率。
 
     返回: (sell_ratio, state, tp_tier)
     tp_tier: 0=未触发, 1=一档, 2=二档（供日志用）
@@ -88,31 +93,50 @@ def check_take_profit(current_gain: float, t: int, cfg: dict,
 
     el = cfg.get("exit_logic", {})
 
+    # 基础止盈阈值（静态或趋势感知动态）
+    tp1_base = el.get("tp_level_1", 0.25)
+    tp2_base = el.get("tp_level_2", 0.50)
+
     if trend_strong:
-        # 动态阈值：不超过配置上限，也不超过历史峰值的 80%/90%
         tp1_cfg = el.get("tp_level_1_strong", 0.40)
         tp2_cfg = el.get("tp_level_2_strong", 0.70)
-        tp1 = min(tp1_cfg, state.gain_peak * 0.80) if state.gain_peak > 0 else tp1_cfg
-        tp2 = min(tp2_cfg, state.gain_peak * 0.90) if state.gain_peak > 0 else tp2_cfg
-        # 确保 tp2 > tp1
-        tp1 = min(tp1, tp2 - 0.05)
-    else:
-        tp1 = el.get("tp_level_1", 0.25)
-        tp2 = el.get("tp_level_2", 0.50)
+        tp1_dyn = min(tp1_cfg, state.gain_peak * 0.80) if state.gain_peak > 0 else tp1_cfg
+        tp2_dyn = min(tp2_cfg, state.gain_peak * 0.90) if state.gain_peak > 0 else tp2_cfg
+        # 动态阈值不低于静态基础，且 tp1 < tp2
+        tp1_base = max(tp1_dyn, tp1_base)
+        tp2_base = max(tp2_dyn, tp2_base)
+        tp1_base = min(tp1_base, tp2_base - 0.05)
 
-    sell1 = el.get("tp_sell_ratio_1", 0.33)
-    sell2 = el.get("tp_sell_ratio_2", 0.33)
+    # 赎回费感知：有效阈值 = 基础阈值 + 赎回费率
+    # 等价于：净浮盈 = 浮盈 - 赎回费率 >= 基础阈值
+    fee_rate = _redemption_fee_rate(holding_days)
+    tp1 = tp1_base + fee_rate
+    tp2 = tp2_base + fee_rate
+
+    # 市场自适应卖出比例：进攻模式少卖让仓位奔跑，防守模式多卖锁利润
+    if market_mode == "attack":
+        sell1 = el.get("tp_sell_ratio_1_attack", 0.20)
+        sell2 = el.get("tp_sell_ratio_2_attack", 0.50)
+    else:
+        sell1 = el.get("tp_sell_ratio_1", 0.40)
+        sell2 = el.get("tp_sell_ratio_2", 0.50)
+
+    # 动态冷却期：进攻模式缩短（快速回补），防守模式延长（确认企稳）
+    if market_mode == "attack":
+        cooldown = el.get("cool_down_days_attack", 3)
+    else:
+        cooldown = el.get("cool_down_days_defense", 7)
 
     if current_gain >= tp2 and not state.tp2_triggered:
-        state.tp_cooldown_end = t + el.get("cool_down_days", 5)
+        state.tp_cooldown_end = t + cooldown
         state.tp2_triggered = True
         return sell2, state, 2
     elif current_gain >= tp1 and not state.tp1_triggered:
-        state.tp_cooldown_end = t + el.get("cool_down_days", 5)
+        state.tp_cooldown_end = t + cooldown
         state.tp1_triggered = True
         return sell1, state, 1
 
-    # 跌落回成本线附近时重置止盈状态，允许开启下一轮网格
+    # 跌落回成本线附近时重置止盈状态
     if current_gain < 0.05:
         state.tp1_triggered = False
         state.tp2_triggered = False
@@ -122,20 +146,25 @@ def check_take_profit(current_gain: float, t: int, cfg: dict,
 
 
 def check_trailing_stop(fund_nav: float, current_gain: float, cfg: dict,
-                        state: PositionState) -> tuple:
+                        state: PositionState, market_mode: str = "defense") -> tuple:
     """
     移动止盈（Trailing Stop）。
 
     - 当持仓收益率超过 activate（默认 30%）后激活
     - 激活后持续跟踪历史最高净值
-    - 当从最高净值回撤超过 drawdown（默认 20%）时触发全部清仓
+    - 当从最高净值回撤超过 drawdown 时触发全部清仓
+    - 进攻模式放宽容忍（10%），防守模式收紧止损（6%）
 
     返回: (sell_ratio, state)
     sell_ratio = 1.0 表示全部清仓，0.0 表示不操作。
     """
     el = cfg.get("exit_logic", {})
     activate = el.get("trailing_stop_activate", 0.30)
-    drawdown = el.get("trailing_stop_drawdown", 0.20)
+    # 动态回撤阈值：进攻模式放宽容忍，防守模式收紧
+    if market_mode == "attack":
+        drawdown = el.get("trailing_stop_drawdown_attack", 0.10)
+    else:
+        drawdown = el.get("trailing_stop_drawdown_defense", 0.06)
 
     if current_gain >= activate:
         state.trailing_active = True
@@ -228,7 +257,7 @@ def check_time_stop(holding_days: int, current_gain: float, cfg: dict,
 def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
                exec_state=None, current_gain: float = 0.0,
                score_eff: float = 50.0, holding_days: int = 0,
-               trend_strong: bool = False) -> tuple:
+               trend_strong: bool = False, market_mode: str = "defense") -> tuple:
     """
     综合退出逻辑检查。
 
@@ -286,28 +315,38 @@ def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
             time_stop = True
 
     # 止盈检查（仅在未触发强平且未触发时间止损时）
+    # 赎回费已集成在 check_take_profit 内：净浮盈 = 浮盈 - 赎回费率
     if not force_reduce and not time_stop and current_gain > 0:
         tp_ratio, pos_state, tp_tier = check_take_profit(
-            current_gain, t, cfg, pos_state, trend_strong
+            current_gain, t, cfg, pos_state, trend_strong,
+            holding_days=holding_days, market_mode=market_mode
         )
         if tp_ratio > 0:
             action = "sell"
             sell_ratio = tp_ratio
 
-        # 移动止盈检查（优先级高于阶梯止盈）
-        ts_ratio, pos_state = check_trailing_stop(fund_nav, current_gain, cfg, pos_state)
+        # 移动止盈检查：同样扣除赎回费后再判断
+        fee_rate_for_trailing = _redemption_fee_rate(holding_days)
+        net_gain_for_trailing = current_gain - fee_rate_for_trailing
+        ts_ratio, pos_state = check_trailing_stop(fund_nav, net_gain_for_trailing, cfg, pos_state, market_mode)
         if ts_ratio > 0:
             action = "sell"
             sell_ratio = ts_ratio
             trailing_stop = True
 
     # === 信号衰减减仓（最低优先级，不覆盖已触发的卖出） ===
+    # 赎回费同样适用：净收益不足时跳过
     if not force_reduce and not time_stop and sell_ratio == 0:
+        fee_rate_for_decay = _redemption_fee_rate(holding_days)
+        net_gain_for_decay = current_gain - fee_rate_for_decay
         sd_ratio, pos_state = check_signal_decay_sell(score_eff, t, cfg, pos_state)
-        if sd_ratio > 0:
+        if sd_ratio > 0 and net_gain_for_decay >= 0:
             action = "sell"
             sell_ratio = sd_ratio
             signal_decay = True
+
+    # 赎回费率信息（供信号推送和回测使用）
+    fee_rate = _redemption_fee_rate(holding_days)
 
     return {
         "warning": warning,
@@ -321,4 +360,5 @@ def check_exit(df, t: int, cfg: dict, pos_state: PositionState,
         "time_stop": time_stop,
         "tp_tier": tp_tier,
         "trend_strong": trend_strong,
+        "redemption_fee_rate": fee_rate,
     }, pos_state

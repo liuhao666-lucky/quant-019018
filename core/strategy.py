@@ -26,7 +26,7 @@ from model.model5_intraday_filter import (
     estimate_today_volume,
 )
 from model.model6_soft_compressor import ExecutionState, compute_score_eff, execute_channel
-from model.model7_exit_logic import PositionState, check_exit
+from model.model7_exit_logic import PositionState, check_exit, _redemption_fee_rate
 from model.model8_market_state import (
     compute_market_temperature, get_market_mode, get_adaptive_params,
 )
@@ -208,6 +208,8 @@ class TMTAlphaStrategy:
 
         # === 快照模式：优先使用 14:45 盘中数据 ===
         snapshot_fallback = False
+        r_fund_override = None           # 14:45 估算基金收益（避免回测用收盘净值引入未来函数）
+        cum_alpha_override = None        # 基于估算值重算的 20 日累计 Alpha
         if self.use_snapshot and t >= self.warmup_days:
             self.snapshot_total += 1
             snap = self.snapshot_map.get(trade_date)
@@ -225,13 +227,28 @@ class TMTAlphaStrategy:
                     r_semi = snap["semi_chg_pct"]
                 if snap.get("ne_chg_pct") is not None:
                     r_ne = snap["ne_chg_pct"]
+                # 14:45 基金净值尚未公布，用估算净值推算当日 r_fund
+                # 避免回测用收盘真实净值（事后才知）误触发 P0 单日暴跌等阈值
+                fund_est = snap.get("fund_nav_estimated")
+                if fund_est is not None and pd.notna(fund_est):
+                    prev_nav = row.get("fund_nav")  # shifted: t 日 fund_nav = t-1 日真实净值
+                    if prev_nav is not None and pd.notna(prev_nav) and prev_nav > 0:
+                        r_fund_override = (fund_est / prev_nav - 1) * 100
+                        # 估算 Alpha = 估算 r_fund - 快照 mkt_chg
+                        est_alpha = r_fund_override - mkt_chg
+                        # 用估算 alpha 替代最后一天的 alpha 重算 Cum_Alpha_20d
+                        live_alpha = df["Alpha_daily"].copy()
+                        live_alpha.iloc[t] = est_alpha
+                        cum_alpha_override = live_alpha.iloc[max(0, t - 19):t + 1].sum()
             else:
                 snapshot_fallback = True
                 logger.warning(f"[警告] {trade_date} 无快照，回退收盘数据")
 
         # === 模块一：漂移雷达 → Action_Ratio ===
         action_ratio, self.cooldown = compute_action_ratio(
-            df, t, cfg, self.cooldown
+            df, t, cfg, self.cooldown,
+            r_fund_override=r_fund_override,
+            cum_alpha_override=cum_alpha_override,
         )
 
         # === 模块二：趋势因子 → Final_Multiplier（含市场自适应参数） ===
@@ -292,7 +309,7 @@ class TMTAlphaStrategy:
         exit_result, self.pos_state = check_exit(
             df, t, cfg, self.pos_state, self.exec_state, current_gain,
             score_eff=score_eff, holding_days=holding_days,
-            trend_strong=trend_strong
+            trend_strong=trend_strong, market_mode=market_mode
         )
 
         # === 综合决策 ===
@@ -317,6 +334,17 @@ class TMTAlphaStrategy:
 
         # 预热期标记
         warmup_active = (t < self.warmup_days)
+
+        # 赎回费信息
+        fee_rate = exit_result.get("redemption_fee_rate", 0.0)
+        if action == "sell" and final_amount != 0:
+            fee_amount = abs(final_amount) * fee_rate
+        elif holding_days > 0:
+            # 非卖出时：估算若今日卖出的赎回费（基于信号金额或持仓比例）
+            fee_amount = abs(amount) * fee_rate if amount != 0 else 0.0
+        else:
+            fee_amount = 0.0
+        net_gain_after_fee = current_gain - fee_rate if current_gain > 0 else current_gain
 
         signal = {
             "trade_date": trade_date,
@@ -355,6 +383,21 @@ class TMTAlphaStrategy:
             "market_mode": market_mode,
             "max_position_ratio": max_pos_adapted,
             "m_max_adapted": m_max_adapted,
+            # 赎回费信息
+            "current_gain": round(current_gain, 4),
+            "holding_days": holding_days,
+            "redemption_fee_rate": fee_rate,
+            "redemption_fee_amount": round(fee_amount, 2),
+            "net_gain_after_fee": round(net_gain_after_fee, 4),
+            # 通知模块扩展字段
+            "tmt_chg_pct": round(r_aic * 0 + mkt_chg, 4),  # 近似，实际从 snapshot 取
+            "r_aic": round(r_aic, 4),
+            "r_ce": round(r_ce, 4),
+            "r_semi": round(r_semi, 4),
+            "r_ne": round(r_ne, 4),
+            "ma60": round(row.get("TMT_MA60", 0), 2) if pd.notna(row.get("TMT_MA60")) else 0,
+            "tmt_close": round(row.get("tmt_close", 0), 2),
+            "total_capital": total_capital,
         }
 
         return signal

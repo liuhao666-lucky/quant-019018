@@ -226,6 +226,16 @@ def run_daily():
     t = len(df) - 1
     signal = strategy.process_day(t, df)
 
+    # 将当日 14:45 信号回写 snapshot_1445，供 23:30 收盘汇总直接引用
+    snapshot["signal_action"] = signal.get("action")
+    snapshot["signal_amount"] = signal.get("amount")
+    snapshot["signal_channel"] = signal.get("channel")
+    snapshot["signal_score_eff"] = signal.get("score_eff")
+    try:
+        save_snapshot_1445(snapshot)
+    except Exception as e:
+        print(f"  [警告] 信号回写快照失败: {e}")
+
     # 第三步：推送企业微信通知
     print("\n[3/3] 推送信号通知…")
     _print_signal(signal)

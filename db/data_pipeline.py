@@ -53,6 +53,17 @@ def _normalize_date_str(d: str) -> str:
     return d
 
 
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict):
+    """为已有表补齐缺失的列（columns: {col_name: col_type}）"""
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table})")
+    existing = {r[1] for r in cursor.fetchall()}
+    for col_name, col_type in columns.items():
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
+            print(f"  已添加列: {table}.{col_name} ({col_type})")
+
+
 def _create_tables(conn: sqlite3.Connection):
     """创建所有表（如不存在）"""
     conn.executescript("""
@@ -95,9 +106,20 @@ def _create_tables(conn: sqlite3.Connection):
             semi_chg_pct      REAL,
             ne_chg_pct        REAL,
             fund_nav_estimated REAL,
+            signal_action     TEXT,
+            signal_amount     REAL,
+            signal_channel    TEXT,
+            signal_score_eff  REAL,
             created_at        TEXT DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    # 为已有数据库补齐信号列（ALTER TABLE 兼容旧表）
+    _ensure_columns(conn, "snapshot_1445", {
+        "signal_action": "TEXT",
+        "signal_amount": "REAL",
+        "signal_channel": "TEXT",
+        "signal_score_eff": "REAL",
+    })
     conn.commit()
 
 
@@ -357,7 +379,8 @@ def save_snapshot_1445(data: dict):
     """
     将 14:45 盘中快照写入 snapshot_1445 表（INSERT OR REPLACE）。
     data 字段: trade_date, tmt_idx, tmt_chg_pct, tmt_volume,
-               aic_chg_pct, ce_chg_pct, semi_chg_pct, ne_chg_pct, fund_nav_estimated
+               aic_chg_pct, ce_chg_pct, semi_chg_pct, ne_chg_pct, fund_nav_estimated,
+               signal_action, signal_amount, signal_channel, signal_score_eff (可选)
     日期统一为 YYYY-MM-DD。
     """
     conn = _get_conn()
@@ -368,8 +391,9 @@ def save_snapshot_1445(data: dict):
             INSERT OR REPLACE INTO snapshot_1445
             (trade_date, tmt_idx, tmt_chg_pct, tmt_volume,
              aic_chg_pct, ce_chg_pct, semi_chg_pct, ne_chg_pct,
-             fund_nav_estimated, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             fund_nav_estimated, signal_action, signal_amount, signal_channel,
+             signal_score_eff, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         conn.execute(sql, (
             td,
@@ -381,6 +405,10 @@ def save_snapshot_1445(data: dict):
             data.get("semi_chg_pct"),
             data.get("ne_chg_pct"),
             data.get("fund_nav_estimated"),
+            data.get("signal_action"),
+            data.get("signal_amount"),
+            data.get("signal_channel"),
+            data.get("signal_score_eff"),
             now_str,
         ))
         conn.commit()

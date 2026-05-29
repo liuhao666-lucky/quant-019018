@@ -76,7 +76,9 @@ def compute_mae_avg_60d(df: pd.DataFrame, t: int, period: int = 60) -> float:
 
 
 def compute_action_ratio(df: pd.DataFrame, t: int, cfg: dict,
-                         cooldown: CooldownState) -> tuple:
+                         cooldown: CooldownState,
+                         r_fund_override: float = None,
+                         cum_alpha_override: float = None) -> tuple:
     """
     Action_Ratio 判定树（核心决策逻辑）。
 
@@ -86,6 +88,9 @@ def compute_action_ratio(df: pd.DataFrame, t: int, cfg: dict,
     第一层 - Alpha 豁免 + 绝对亏损防锯齿（冷却锁）
     第二层 - 负向偏离惩罚
     第三层 - 系统失效阻断
+
+    r_fund_override / cum_alpha_override: 快照回测时，14:45 基金净值尚未公布，
+    使用 snapshot.fund_nav_estimated 推算的估算值，避免回测引入未来函数。
     """
     dm = cfg.get("drift_monitor", {})
 
@@ -102,9 +107,9 @@ def compute_action_ratio(df: pd.DataFrame, t: int, cfg: dict,
     block_thresh = dm.get("action_block_threshold", 0.50)
 
     # 读取当前行的预计算指标（优先使用 _live 列，14:45 可观测数据未经 shift）
-    cum_alpha = df.get("Cum_Alpha_20d_live", df["Cum_Alpha_20d"]).iloc[t]
+    cum_alpha = cum_alpha_override if cum_alpha_override is not None else df.get("Cum_Alpha_20d_live", df["Cum_Alpha_20d"]).iloc[t]
     fund_dd_20d = df.get("Fund_DD_20d_live", df["Fund_DD_20d"]).iloc[t]
-    r_fund = df.get("R_fund_live", df["R_fund"]).iloc[t]
+    r_fund = r_fund_override if r_fund_override is not None else df.get("R_fund_live", df["R_fund"]).iloc[t]
 
     # 冷却期内直接返回锁定值
     if cooldown.is_cooling:
